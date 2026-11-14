@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.STRIDE" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/stride_primary</item>
+        <item name="colorSecondary">@color/stride_secondary</item>
+        <item name="android:statusBarColor">@color/stride_background</item>
+        <item name="android:navigationBarColor">@color/stride_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">@color/stride_background</item>
+    </style>
+</resources>

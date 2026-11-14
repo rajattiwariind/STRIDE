@@ -1,0 +1,11 @@
+<resources>
+    <color name="stride_background">#08090D</color>
+    <color name="stride_surface">#141622</color>
+    <color name="stride_surface_2">#1B1E2B</color>
+    <color name="stride_primary">#9875FF</color>
+    <color name="stride_secondary">#62D5FF</color>
+    <color name="stride_text">#FFFFFF</color>
+    <color name="stride_muted">#9699AA</color>
+    <color name="stride_border">#292B39</color>
+    <color name="stride_green">#64D9AE</color>
+</resources>
