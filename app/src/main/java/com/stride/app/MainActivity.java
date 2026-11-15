@@ -4,6 +4,8 @@ package com.stride.app;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.animation.ValueAnimator;
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
 import android.app.Dialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -12,9 +14,13 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.RadialGradient;
+import android.graphics.Shader;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
@@ -36,11 +42,14 @@ import com.google.android.material.card.MaterialCardView;
 
 import com.stride.app.data.StrideDatabase;
 import com.stride.app.data.WalkSession;
+import com.stride.app.data.DailyStats;
+import com.stride.app.data.StepMinute;
 import com.stride.app.tracking.TrackingService;
 import com.stride.app.utils.DateUtils;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -63,6 +72,7 @@ public class MainActivity extends AppCompatActivity {
     private TextView currentWalkValue;
     private TextView remainingStepValue;
     private TextView distanceValue;
+    private TextView caloriesValue;
 
     private MilestoneOrbitView milestoneOrbit;
 
@@ -78,6 +88,8 @@ public class MainActivity extends AppCompatActivity {
     private int todaySteps = 0;
 
     private double liveDistance = 0;
+
+    private Dialog fireworkDialog;
 
     private final ExecutorService io =
             Executors.newSingleThreadExecutor();
@@ -445,7 +457,7 @@ public class MainActivity extends AppCompatActivity {
 
         textIn(
                 box,
-                "VIOLET: 5K MILESTONE     BLUE: 10K GOAL",
+                "VIOLET: 5K MILESTONE     BLUE: YOUR DAILY GOAL",
                 10,
                 0xFFB7A0FF,
                 true,
@@ -486,6 +498,81 @@ public class MainActivity extends AppCompatActivity {
 
         content.addView(hero, matchWrap());
 
+        // --------------------------------------------------
+        // MANUAL FIREWORK CELEBRATION
+        // --------------------------------------------------
+
+        MaterialCardView celebrationCard = card();
+
+        LinearLayout celebrationBox = column();
+
+        celebrationBox.setPadding(
+                dp(18),
+                dp(16),
+                dp(18),
+                dp(16)
+        );
+
+        textIn(
+                celebrationBox,
+                "MAKE THIS MOMENT COUNT",
+                10,
+                0xFFB7A0FF,
+                true,
+                0
+        );
+
+        textIn(
+                celebrationBox,
+                "Celebrate your progress",
+                18,
+                0xFFFFFFFF,
+                true,
+                6
+        );
+
+        textIn(
+                celebrationBox,
+                "Launch your STRIDE firework show whenever you want.",
+                12,
+                0xFF9699AA,
+                false,
+                5
+        );
+
+        MaterialButton celebrateButton = new MaterialButton(this);
+
+        celebrateButton.setText("✦  PLAY FIREWORK CELEBRATION");
+        celebrateButton.setTextColor(0xFFFFFFFF);
+        celebrateButton.setTextSize(12);
+        celebrateButton.setCornerRadius(dp(15));
+        celebrateButton.setBackgroundTintList(
+                android.content.res.ColorStateList.valueOf(
+                        0xFF7955D9
+                )
+        );
+
+        LinearLayout.LayoutParams celebrateParams =
+                new LinearLayout.LayoutParams(
+                        -1,
+                        dp(54)
+                );
+
+        celebrateParams.topMargin = dp(14);
+
+        celebrationBox.addView(
+                celebrateButton,
+                celebrateParams
+        );
+
+        celebrateButton.setOnClickListener(v ->
+                showFireworkIntro(todaySteps)
+        );
+
+        celebrationCard.addView(celebrationBox);
+
+        content.addView(celebrationCard, matchWrap());
+
         text(
                 "Your statistics",
                 19,
@@ -503,15 +590,15 @@ public class MainActivity extends AppCompatActivity {
                 String.format(
                         Locale.getDefault(),
                         "%.2f km",
-                        liveDistance / 1000
+                        getEstimatedDailyDistanceKm()
                 ),
-                "Current GPS walk"
+                "Estimated from today's steps"
         );
 
         MaterialCardView cal = statCard(
                 "CALORIES",
-                "— kcal",
-                "Estimate requires profile"
+                getEstimatedDailyCaloriesText(),
+                getCaloriesSubtitle()
         );
 
         stats.addView(
@@ -668,8 +755,6 @@ public class MainActivity extends AppCompatActivity {
         content.addView(week, matchWrap());
 
         updateDashboardValues();
-
-        loadTodayStats();
     }
 
     // --------------------------------------------------
@@ -684,12 +769,79 @@ public class MainActivity extends AppCompatActivity {
         );
     }
 
+    private int getDailyGoal() {
+
+        return getSharedPreferences(
+                "stride_settings",
+                MODE_PRIVATE
+        ).getInt("fitness_goal", DAILY_GOAL);
+    }
+
     private int getRemainingSteps() {
 
         return Math.max(
                 0,
-                DAILY_GOAL - todaySteps
+                getDailyGoal() - todaySteps
         );
+    }
+
+    // Approximate daily walking distance from step count and profile height.
+    // Average walking step length is estimated as 0.414 x height.
+    private double getEstimatedDailyDistanceKm() {
+
+        SharedPreferences prefs = getSharedPreferences(
+                "stride_settings",
+                MODE_PRIVATE
+        );
+
+        int heightCm = prefs.getInt("height_cm", 0);
+
+        // Use a conservative generic step length until height is provided.
+        double stepLengthMeters = heightCm > 0
+                ? (heightCm / 100.0) * 0.414
+                : 0.72;
+
+        return (Math.max(0, todaySteps) * stepLengthMeters) / 1000.0;
+    }
+
+    // Approximate walking energy: about 0.5 kcal per kg per kilometre.
+    // This is an estimate, not a medical or exercise-lab measurement.
+    private double getEstimatedDailyCalories() {
+
+        SharedPreferences prefs = getSharedPreferences(
+                "stride_settings",
+                MODE_PRIVATE
+        );
+
+        float weightKg = prefs.getFloat("weight_kg", 0f);
+
+        if (weightKg <= 0f) {
+            return -1;
+        }
+
+        return weightKg * getEstimatedDailyDistanceKm() * 0.5;
+    }
+
+    private String getEstimatedDailyCaloriesText() {
+
+        double calories = getEstimatedDailyCalories();
+
+        if (calories < 0) {
+            return "— kcal";
+        }
+
+        return String.format(
+                Locale.getDefault(),
+                "%.0f kcal",
+                calories
+        );
+    }
+
+    private String getCaloriesSubtitle() {
+
+        return getEstimatedDailyCalories() < 0
+                ? "Add weight in Profile"
+                : "Approximate walking burn";
     }
 
     private String formatSteps(int steps) {
@@ -741,9 +893,13 @@ public class MainActivity extends AppCompatActivity {
                     String.format(
                             Locale.getDefault(),
                             "%.2f km",
-                            liveDistance / 1000
+                            getEstimatedDailyDistanceKm()
                     )
             );
+        }
+
+        if (caloriesValue != null) {
+            caloriesValue.setText(getEstimatedDailyCaloriesText());
         }
 
         checkMilestoneUnlocks();
@@ -773,9 +929,7 @@ public class MainActivity extends AppCompatActivity {
 
         SharedPreferences.Editor editor = prefs.edit();
 
-        // Existing milestones are marked as already achieved.
-        // This prevents old celebrations appearing on app launch.
-
+        // Mark normal milestones already reached today.
         for (int milestone : MILESTONES) {
 
             if (todaySteps >= milestone) {
@@ -784,6 +938,23 @@ public class MainActivity extends AppCompatActivity {
                         today + "_" + milestone,
                         true
                 );
+            }
+        }
+
+        // Mark previously reached firework milestones.
+        // This prevents old celebrations from playing
+        // when the user opens the app.
+        for (int milestone = 5000;
+             milestone <= todaySteps;
+             milestone += 5000) {
+
+            editor.putBoolean(
+                    today + "_firework_" + milestone,
+                    true
+            );
+
+            if (milestone > Integer.MAX_VALUE - 5000) {
+                break;
             }
         }
 
@@ -802,8 +973,6 @@ public class MainActivity extends AppCompatActivity {
 
         String today = DateUtils.todayKey();
 
-        // Handle a new day.
-
         if (!today.equals(milestoneDateKey)) {
 
             initializeMilestoneState();
@@ -819,6 +988,11 @@ public class MainActivity extends AppCompatActivity {
         SharedPreferences.Editor editor = prefs.edit();
 
         int newlyUnlocked = 0;
+        int newlyUnlockedFirework = 0;
+
+        // ------------------------------------------
+        // NORMAL MILESTONES
+        // ------------------------------------------
 
         for (int milestone : MILESTONES) {
 
@@ -829,16 +1003,50 @@ public class MainActivity extends AppCompatActivity {
 
                 editor.putBoolean(key, true);
 
-                // If several milestones are crossed together,
-                // celebrate only the highest one.
+                // 5K and 10K use the firework animation.
+                if (milestone != 5000 &&
+                        milestone != 10000) {
 
-                newlyUnlocked = milestone;
+                    newlyUnlocked = milestone;
+                }
+            }
+        }
+
+        // ------------------------------------------
+        // FIREWORK MILESTONES
+        // 5K, 10K, 15K, 20K, 25K...
+        // ------------------------------------------
+
+        for (int milestone = 5000;
+             milestone <= todaySteps;
+             milestone += 5000) {
+
+            String key =
+                    today + "_firework_" + milestone;
+
+            if (!prefs.getBoolean(key, false)) {
+
+                editor.putBoolean(key, true);
+
+                newlyUnlockedFirework = milestone;
+            }
+
+            if (milestone > Integer.MAX_VALUE - 5000) {
+                break;
             }
         }
 
         editor.apply();
 
-        if (newlyUnlocked > 0) {
+        // ------------------------------------------
+        // SHOW CELEBRATION
+        // ------------------------------------------
+
+        if (newlyUnlockedFirework > 0) {
+
+            showFireworkIntro(todaySteps);
+
+        } else if (newlyUnlocked > 0) {
 
             showMilestoneCelebration(newlyUnlocked);
         }
@@ -963,8 +1171,6 @@ public class MainActivity extends AppCompatActivity {
                 )
         );
 
-        // Achievement symbol
-
         TextView symbol = new TextView(this);
 
         symbol.setText("✦");
@@ -988,8 +1194,6 @@ public class MainActivity extends AppCompatActivity {
 
         root.addView(symbol, symbolParams);
 
-        // Heading
-
         TextView heading = textIn(
                 root,
                 "MILESTONE UNLOCKED",
@@ -1000,8 +1204,6 @@ public class MainActivity extends AppCompatActivity {
         );
 
         heading.setGravity(Gravity.CENTER);
-
-        // Achievement title
 
         TextView title = textIn(
                 root,
@@ -1014,8 +1216,6 @@ public class MainActivity extends AppCompatActivity {
 
         title.setGravity(Gravity.CENTER);
 
-        // Step count
-
         TextView count = textIn(
                 root,
                 formatSteps(steps) + " STEPS",
@@ -1027,8 +1227,6 @@ public class MainActivity extends AppCompatActivity {
 
         count.setGravity(Gravity.CENTER);
 
-        // Description
-
         TextView message = textIn(
                 root,
                 getMilestoneMessage(steps),
@@ -1039,8 +1237,6 @@ public class MainActivity extends AppCompatActivity {
         );
 
         message.setGravity(Gravity.CENTER);
-
-        // Continue button
 
         MaterialButton button = new MaterialButton(this);
 
@@ -1088,8 +1284,6 @@ public class MainActivity extends AppCompatActivity {
                     WindowManager.LayoutParams.WRAP_CONTENT
             );
         }
-
-        // Entrance animation
 
         root.setScaleX(0.80f);
         root.setScaleY(0.80f);
@@ -1153,10 +1347,10 @@ public class MainActivity extends AppCompatActivity {
                     newSteps
             );
 
-            activeAnimator.setDuration(850);
+            activeAnimator.setDuration(700);
 
             activeAnimator.setInterpolator(
-                    new DecelerateInterpolator()
+                    new DecelerateInterpolator(1.5f)
             );
 
             activeAnimator.addUpdateListener(animation -> {
@@ -1191,8 +1385,6 @@ public class MainActivity extends AppCompatActivity {
             paint.setStrokeWidth(stroke);
             paint.setStrokeCap(Paint.Cap.ROUND);
 
-            // OUTER ORBIT TRACK
-
             outerRect.set(
                     cx - outerRadius,
                     cy - outerRadius,
@@ -1210,11 +1402,9 @@ public class MainActivity extends AppCompatActivity {
                     paint
             );
 
-            // OUTER BLUE DAILY GOAL
-
             float dailyProgress = Math.min(
                     1f,
-                    animatedSteps / DAILY_GOAL
+                    animatedSteps / getDailyGoal()
             );
 
             paint.setColor(BLUE);
@@ -1226,8 +1416,6 @@ public class MainActivity extends AppCompatActivity {
                     false,
                     paint
             );
-
-            // INNER ORBIT TRACK
 
             innerRect.set(
                     cx - innerRadius,
@@ -1246,8 +1434,6 @@ public class MainActivity extends AppCompatActivity {
                     paint
             );
 
-            // INNER VIOLET MILESTONE
-
             float milestoneProgress = Math.min(
                     1f,
                     animatedSteps / MILESTONE_GOAL
@@ -1262,8 +1448,6 @@ public class MainActivity extends AppCompatActivity {
                     false,
                     paint
             );
-
-            // CENTER TEXT
 
             paint.setStyle(Paint.Style.FILL);
             paint.setTextAlign(Paint.Align.CENTER);
@@ -1311,7 +1495,25 @@ public class MainActivity extends AppCompatActivity {
                     paint
             );
 
-            // ORBIT INDICATORS
+            // DAILY GOAL PERCENTAGE
+
+            paint.setColor(BLUE);
+            paint.setTextSize(dp(10));
+            paint.setTypeface(Typeface.DEFAULT);
+
+            int percentage = Math.round(
+                    Math.min(
+                            100f,
+                            animatedSteps / getDailyGoal() * 100f
+                    )
+            );
+
+            canvas.drawText(
+                    percentage + "% OF DAILY GOAL",
+                    cx,
+                    cy + dp(49),
+                    paint
+            );
 
             drawIndicator(
                     canvas,
@@ -1376,6 +1578,739 @@ public class MainActivity extends AppCompatActivity {
 
             if (activeAnimator != null) {
                 activeAnimator.cancel();
+            }
+
+            super.onDetachedFromWindow();
+        }
+    }
+
+    // --------------------------------------------------
+    // STRIDE FIREWORK INTRO
+    // --------------------------------------------------
+
+    private void showFireworkIntro(int steps) {
+
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+
+        // Prevent multiple firework dialogs from opening.
+        if (fireworkDialog != null &&
+                fireworkDialog.isShowing()) {
+            return;
+        }
+
+        fireworkDialog = new Dialog(this);
+
+        FireworkIntroView fireworkView =
+                new FireworkIntroView(this, steps);
+
+        fireworkDialog.setContentView(fireworkView);
+
+        fireworkDialog.setCancelable(false);
+
+        Window window = fireworkDialog.getWindow();
+
+        if (window != null) {
+
+            window.setBackgroundDrawable(
+                    new ColorDrawable(Color.TRANSPARENT)
+            );
+
+            window.setLayout(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT
+            );
+
+            window.setStatusBarColor(0xFF08090D);
+            window.setNavigationBarColor(0xFF08090D);
+        }
+
+        fireworkDialog.show();
+
+        if (window != null) {
+
+            window.setLayout(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT
+            );
+        }
+
+        fireworkView.startAnimation(() -> {
+
+            if (fireworkDialog != null &&
+                    fireworkDialog.isShowing()) {
+
+                fireworkDialog.dismiss();
+            }
+
+            fireworkDialog = null;
+        });
+    }
+
+    // --------------------------------------------------
+    // BIG STRIDE FIRECRACKER - 5 SECONDS
+    // --------------------------------------------------
+
+    private class FireworkIntroView extends View {
+
+        private final Paint paint =
+                new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        private final int stepCount;
+
+        private final int[] colors = {
+                0xFF38BDF8,
+                0xFF9875FF,
+                0xFFA78BFA,
+                0xFFFFFFFF,
+                0xFF64D9AE,
+                0xFFFFB84D,
+                0xFFFF668C,
+                0xFFFFE082
+        };
+
+        private static final int BURST_COUNT = 3;
+        private static final int PARTICLES_PER_BURST = 110;
+
+        private final float[][] particleAngles =
+                new float[BURST_COUNT][PARTICLES_PER_BURST];
+
+        private final float[][] particleSpeeds =
+                new float[BURST_COUNT][PARTICLES_PER_BURST];
+
+        private final float[][] particleSizes =
+                new float[BURST_COUNT][PARTICLES_PER_BURST];
+
+        private final int[][] particleColors =
+                new int[BURST_COUNT][PARTICLES_PER_BURST];
+
+        private final float[] burstX = new float[BURST_COUNT];
+        private final float[] burstY = new float[BURST_COUNT];
+
+        private final float[] burstStart = {
+                0.20f,
+                0.43f,
+                0.63f
+        };
+
+        private final float[] burstDuration = {
+                0.34f,
+                0.34f,
+                0.34f
+        };
+
+        private float progress = 0f;
+
+        private ValueAnimator animator;
+
+        private Runnable onFinished;
+
+        public FireworkIntroView(
+                Context context,
+                int steps
+        ) {
+
+            super(context);
+
+            stepCount = Math.max(0, steps);
+
+            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+
+            Random random = new Random();
+
+            for (int burst = 0; burst < BURST_COUNT; burst++) {
+
+                for (int i = 0; i < PARTICLES_PER_BURST; i++) {
+
+                    particleAngles[burst][i] =
+                            (float) (random.nextDouble() * Math.PI * 2);
+
+                    particleSpeeds[burst][i] =
+                            dp(110) + random.nextFloat() * dp(260);
+
+                    particleSizes[burst][i] =
+                            dp(2) + random.nextFloat() * dp(4);
+
+                    particleColors[burst][i] =
+                            colors[random.nextInt(colors.length)];
+                }
+            }
+        }
+
+        // --------------------------------------------------
+        // START 5 SECOND ANIMATION
+        // --------------------------------------------------
+
+        public void startAnimation(Runnable finished) {
+
+            onFinished = finished;
+
+            animator = ValueAnimator.ofFloat(0f, 1f);
+
+            animator.setDuration(5000);
+
+            animator.setInterpolator(
+                    new DecelerateInterpolator(0.7f)
+            );
+
+            animator.addUpdateListener(animation -> {
+
+                progress =
+                        (float) animation.getAnimatedValue();
+
+                invalidate();
+            });
+
+            animator.addListener(
+                    new AnimatorListenerAdapter() {
+
+                        @Override
+                        public void onAnimationEnd(
+                                Animator animation
+                        ) {
+
+                            if (onFinished != null) {
+                                onFinished.run();
+                            }
+                        }
+                    }
+            );
+
+            animator.start();
+        }
+
+        // --------------------------------------------------
+        // DRAW ANIMATION
+        // --------------------------------------------------
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+
+            super.onDraw(canvas);
+
+            float width = getWidth();
+            float height = getHeight();
+
+            float cx = width / 2f;
+            float cy = height * 0.43f;
+
+            // BACKGROUND
+
+            canvas.drawColor(0xFF08090D);
+
+            // BACKGROUND ENERGY GLOW
+
+            paint.setStyle(Paint.Style.FILL);
+
+            paint.setShader(
+                    new RadialGradient(
+                            cx,
+                            cy,
+                            dp(310),
+                            new int[]{
+                                    0x553B78C5,
+                                    0x332D3C91,
+                                    0x221D174F,
+                                    0x0008090D
+                            },
+                            null,
+                            Shader.TileMode.CLAMP
+                    )
+            );
+
+            canvas.drawCircle(
+                    cx,
+                    cy,
+                    dp(310),
+                    paint
+            );
+
+            paint.setShader(null);
+
+            // FIREWORK LOCATIONS
+
+            burstX[0] = cx;
+            burstY[0] = cy;
+
+            burstX[1] = cx - width * 0.27f;
+            burstY[1] = cy - height * 0.12f;
+
+            burstX[2] = cx + width * 0.27f;
+            burstY[2] = cy - height * 0.12f;
+
+            // --------------------------------------------------
+            // ROCKET LAUNCH
+            // --------------------------------------------------
+
+            float launchProgress =
+                    Math.min(1f, progress / 0.20f);
+
+            if (progress < 0.23f) {
+
+                float rocketY =
+                        height * 0.91f -
+                                launchProgress * height * 0.49f;
+
+                // Rocket trail glow
+
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeCap(Paint.Cap.ROUND);
+                paint.setStrokeWidth(dp(12));
+                paint.setColor(0x4438BDF8);
+
+                canvas.drawLine(
+                        cx,
+                        rocketY + dp(70),
+                        cx,
+                        rocketY,
+                        paint
+                );
+
+                // Main rocket trail
+
+                paint.setStrokeWidth(dp(4));
+                paint.setColor(0xFF38BDF8);
+
+                canvas.drawLine(
+                        cx,
+                        rocketY + dp(45),
+                        cx,
+                        rocketY,
+                        paint
+                );
+
+                // Rocket head
+
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(Color.WHITE);
+
+                canvas.drawCircle(
+                        cx,
+                        rocketY,
+                        dp(7),
+                        paint
+                );
+
+                // Rocket glow
+
+                paint.setColor(0x6638BDF8);
+
+                canvas.drawCircle(
+                        cx,
+                        rocketY,
+                        dp(23),
+                        paint
+                );
+            }
+
+            // --------------------------------------------------
+            // THREE MASSIVE FIREWORK EXPLOSIONS
+            // --------------------------------------------------
+
+            for (int burst = 0; burst < BURST_COUNT; burst++) {
+
+                float start = burstStart[burst];
+
+                float duration = burstDuration[burst];
+
+                float burstProgress =
+                        (progress - start) / duration;
+
+                if (burstProgress < 0f ||
+                        burstProgress > 1f) {
+
+                    continue;
+                }
+
+                float expansion =
+                        1f - (1f - burstProgress)
+                                * (1f - burstProgress);
+
+                float fade =
+                        1f - burstProgress;
+
+                float explosionRadius =
+                        dp(15) + expansion * dp(235);
+
+                float explosionX = burstX[burst];
+                float explosionY = burstY[burst];
+
+                // BIG CENTRAL FLASH
+
+                if (burstProgress < 0.20f) {
+
+                    float flash =
+                            1f - burstProgress / 0.20f;
+
+                    paint.setStyle(Paint.Style.FILL);
+
+                    paint.setColor(
+                            ((int) (255 * flash) << 24)
+                                    | 0x00FFFFFF
+                    );
+
+                    canvas.drawCircle(
+                            explosionX,
+                            explosionY,
+                            dp(65) * flash,
+                            paint
+                    );
+
+                    paint.setColor(
+                            ((int) (100 * flash) << 24)
+                                    | 0x0038BDF8
+                    );
+
+                    canvas.drawCircle(
+                            explosionX,
+                            explosionY,
+                            dp(115) * flash,
+                            paint
+                    );
+                }
+
+                // EXPLOSION RING
+
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(3));
+                paint.setColor(
+                        ((int) (180 * fade) << 24)
+                                | 0x009875FF
+                );
+
+                canvas.drawCircle(
+                        explosionX,
+                        explosionY,
+                        explosionRadius * 0.70f,
+                        paint
+                );
+
+                // PARTICLES
+
+                for (int i = 0; i < PARTICLES_PER_BURST; i++) {
+
+                    double angle =
+                            particleAngles[burst][i];
+
+                    float distance =
+                            explosionRadius *
+                                    (particleSpeeds[burst][i] / dp(370));
+
+                    float gravity =
+                            burstProgress * burstProgress * dp(105);
+
+                    float x =
+                            explosionX +
+                                    (float) Math.cos(angle) * distance;
+
+                    float y =
+                            explosionY +
+                                    (float) Math.sin(angle) * distance
+                                    + gravity;
+
+                    int alpha = Math.max(
+                            0,
+                            Math.min(
+                                    255,
+                                    (int) (255 * fade)
+                            )
+                    );
+
+                    int particleColor =
+                            particleColors[burst][i];
+
+                    // PARTICLE GLOW
+
+                    paint.setStyle(Paint.Style.FILL);
+
+                    paint.setColor(
+                            (Math.max(0, alpha / 4) << 24)
+                                    | (particleColor & 0x00FFFFFF)
+                    );
+
+                    paint.setShadowLayer(
+                            dp(15),
+                            0,
+                            0,
+                            particleColor
+                    );
+
+                    canvas.drawCircle(
+                            x,
+                            y,
+                            particleSizes[burst][i] * 3f * fade,
+                            paint
+                    );
+
+                    paint.clearShadowLayer();
+
+                    // BRIGHT PARTICLE CORE
+
+                    paint.setColor(
+                            (alpha << 24)
+                                    | (particleColor & 0x00FFFFFF)
+                    );
+
+                    canvas.drawCircle(
+                            x,
+                            y,
+                            Math.max(
+                                    dp(0.5f),
+                                    particleSizes[burst][i] * fade
+                            ),
+                            paint
+                    );
+
+                    // LONG SPARK TRAIL
+
+                    paint.setStyle(Paint.Style.STROKE);
+
+                    paint.setStrokeCap(Paint.Cap.ROUND);
+
+                    paint.setStrokeWidth(
+                            Math.max(
+                                    dp(1),
+                                    dp(3) * fade
+                            )
+                    );
+
+                    paint.setColor(
+                            (Math.max(0, alpha / 2) << 24)
+                                    | (particleColor & 0x00FFFFFF)
+                    );
+
+                    float tailLength =
+                            dp(30) * fade;
+
+                    float tailX =
+                            x - (float) Math.cos(angle) * tailLength;
+
+                    float tailY =
+                            y - (float) Math.sin(angle) * tailLength;
+
+                    canvas.drawLine(
+                            tailX,
+                            tailY,
+                            x,
+                            y,
+                            paint
+                    );
+                }
+            }
+
+            // --------------------------------------------------
+            // EXTRA ENERGY FLASH
+            // --------------------------------------------------
+
+            if (progress > 0.18f && progress < 0.28f) {
+
+                float flash =
+                        1f - (progress - 0.18f) / 0.10f;
+
+                paint.setStyle(Paint.Style.STROKE);
+
+                paint.setStrokeWidth(dp(5));
+
+                paint.setColor(
+                        ((int) (200 * flash) << 24)
+                                | 0x00FFFFFF
+                );
+
+                canvas.drawCircle(
+                        cx,
+                        cy,
+                        dp(90) + dp(160) * (1f - flash),
+                        paint
+                );
+            }
+
+            // --------------------------------------------------
+            // STEP COUNT REVEAL
+            // --------------------------------------------------
+
+            if (progress > 0.42f) {
+
+                float reveal =
+                        Math.min(
+                                1f,
+                                (progress - 0.42f) / 0.20f
+                        );
+
+                float scale =
+                        0.65f + 0.35f * reveal;
+
+                canvas.save();
+
+                canvas.scale(
+                        scale,
+                        scale,
+                        cx,
+                        cy + dp(55)
+                );
+
+                // HEADING
+
+                paint.setStyle(Paint.Style.FILL);
+
+                paint.setColor(0xFFB5B5C5);
+
+                paint.setTextAlign(Paint.Align.CENTER);
+
+                paint.setTextSize(dp(13));
+
+                paint.setTypeface(Typeface.DEFAULT);
+
+                canvas.drawText(
+                        "YOUR DAILY MOVEMENT",
+                        cx,
+                        cy + dp(65),
+                        paint
+                );
+
+                // STEP COUNT
+
+                paint.setColor(0xFFFFFFFF);
+
+                paint.setTextSize(dp(47));
+
+                paint.setTypeface(
+                        Typeface.create(
+                                "sans-serif",
+                                Typeface.BOLD
+                        )
+                );
+
+                paint.setShadowLayer(
+                        dp(22),
+                        0,
+                        0,
+                        0xFF38BDF8
+                );
+
+                canvas.drawText(
+                        String.format(
+                                Locale.getDefault(),
+                                "%,d",
+                                stepCount
+                        ),
+                        cx,
+                        cy + dp(125),
+                        paint
+                );
+
+                paint.clearShadowLayer();
+
+                // STEPS LABEL
+
+                paint.setColor(0xFF38BDF8);
+
+                paint.setTextSize(dp(16));
+
+                paint.setTypeface(Typeface.DEFAULT_BOLD);
+
+                canvas.drawText(
+                        "STEPS",
+                        cx,
+                        cy + dp(158),
+                        paint
+                );
+
+                // DAILY MESSAGE
+
+                paint.setColor(0xFFA78BFA);
+
+                paint.setTextSize(dp(12));
+
+                paint.setTypeface(Typeface.DEFAULT);
+
+                canvas.drawText(
+                        "KEEP MOVING. KEEP WINNING.",
+                        cx,
+                        cy + dp(195),
+                        paint
+                );
+
+                canvas.restore();
+            }
+
+            // --------------------------------------------------
+            // STRIDE BRAND
+            // --------------------------------------------------
+
+            paint.setStyle(Paint.Style.FILL);
+
+            paint.setColor(0xFFFFFFFF);
+
+            paint.setTextAlign(Paint.Align.CENTER);
+
+            paint.setTextSize(dp(25));
+
+            paint.setTypeface(
+                    Typeface.create(
+                            "sans-serif",
+                            Typeface.BOLD
+                    )
+            );
+
+            canvas.drawText(
+                    "STRIDE",
+                    cx,
+                    height * 0.13f,
+                    paint
+            );
+
+            paint.setColor(0xFF9875FF);
+
+            paint.setTextSize(dp(10));
+
+            paint.setTypeface(Typeface.DEFAULT_BOLD);
+
+            canvas.drawText(
+                    "MOVE BEYOND LIMITS",
+                    cx,
+                    height * 0.13f + dp(22),
+                    paint
+            );
+
+            // --------------------------------------------------
+            // FINAL FADE INDICATOR
+            // --------------------------------------------------
+
+            if (progress > 0.90f) {
+
+                float alpha =
+                        (progress - 0.90f) / 0.10f;
+
+                paint.setColor(
+                        ((int) (180 * alpha) << 24)
+                                | 0x00FFFFFF
+                );
+
+                paint.setTextSize(dp(10));
+
+                paint.setTypeface(Typeface.DEFAULT);
+
+                canvas.drawText(
+                        "LET'S GET MOVING",
+                        cx,
+                        height * 0.88f,
+                        paint
+                );
+            }
+        }
+
+        // --------------------------------------------------
+        // CLEANUP
+        // --------------------------------------------------
+
+        @Override
+        protected void onDetachedFromWindow() {
+
+            if (animator != null) {
+
+                animator.cancel();
+                animator = null;
             }
 
             super.onDetachedFromWindow();
@@ -1593,6 +2528,10 @@ public class MainActivity extends AppCompatActivity {
 
             runOnUiThread(() -> {
 
+                if (isFinishing() || isDestroyed()) {
+                    return;
+                }
+
                 todaySteps = Math.max(
                         todaySteps,
                         steps
@@ -1639,6 +2578,10 @@ public class MainActivity extends AppCompatActivity {
                             .getSessions();
 
             runOnUiThread(() -> {
+
+                if (isFinishing() || isDestroyed()) {
+                    return;
+                }
 
                 content.removeView(loading);
 
@@ -1706,66 +2649,424 @@ public class MainActivity extends AppCompatActivity {
     private void showInsights() {
 
         content.removeAllViews();
-
         header();
 
-        text(
-                "Insights",
-                28,
-                0xFFFFFFFF,
-                true,
-                22
-        );
+        text("Your Insights", 28, 0xFFFFFFFF, true, 22);
+        text("Understand your movement. Improve every day.",
+                13, 0xFF9699AA, false, 5);
 
-        MaterialCardView c = card();
-
-        LinearLayout b = column();
-
-        b.setPadding(
-                dp(18),
-                dp(18),
-                dp(18),
-                dp(18)
-        );
-
-        textIn(
-                b,
-                "YOUR MOVEMENT DATA",
-                11,
+        TextView loading = text(
+                "Loading your activity data...",
+                14,
                 0xFFB7A0FF,
-                true,
-                12
-        );
-
-        textIn(
-                b,
-                "Your saved walks and daily totals stay on this device.",
-                15,
-                0xFFFFFFFF,
                 false,
-                8
+                20
         );
 
-        textIn(
-                b,
-                "A weekly chart and personal records can be added after you have collected activity data.",
-                13,
-                0xFF9699AA,
-                false,
-                0
-        );
+        io.execute(() -> {
 
-        c.addView(b);
+            String today = DateUtils.todayKey();
 
-        content.addView(c, matchWrap());
+            List<StepMinute> minuteData =
+                    StrideDatabase.get(this)
+                            .strideDao()
+                            .getStepMinutesForDay(today);
 
-        MaterialButton export = new MaterialButton(this);
+            List<DailyStats> weeklyData =
+                    StrideDatabase.get(this)
+                            .strideDao()
+                            .getLastSevenDays();
 
-        export.setText("VIEW SAVED WALKS");
+            runOnUiThread(() -> {
 
-        export.setOnClickListener(v -> showHistory());
+                if (isFinishing() || isDestroyed()) return;
 
-        content.addView(export);
+                content.removeView(loading);
+
+                text("TODAY'S OVERVIEW", 11, 0xFFB7A0FF, true, 20);
+
+                LinearLayout overview = new LinearLayout(this);
+                overview.setOrientation(LinearLayout.HORIZONTAL);
+
+                overview.addView(
+                        statCard("STEPS", formatSteps(todaySteps), "Today's movement"),
+                        new LinearLayout.LayoutParams(0, dp(116), 1)
+                );
+
+                LinearLayout.LayoutParams distanceParams =
+                        new LinearLayout.LayoutParams(0, dp(116), 1);
+                distanceParams.leftMargin = dp(10);
+
+                overview.addView(
+                        statCard(
+                                "DISTANCE",
+                                String.format(Locale.getDefault(), "%.2f km", getEstimatedDailyDistanceKm()),
+                                "Estimated distance"
+                        ),
+                        distanceParams
+                );
+
+                content.addView(overview, matchWrap());
+
+                LinearLayout secondRow = new LinearLayout(this);
+                secondRow.setOrientation(LinearLayout.HORIZONTAL);
+
+                secondRow.addView(
+                        statCard("CALORIES", getEstimatedDailyCaloriesText(), getCaloriesSubtitle()),
+                        new LinearLayout.LayoutParams(0, dp(116), 1)
+                );
+
+                LinearLayout.LayoutParams goalParams =
+                        new LinearLayout.LayoutParams(0, dp(116), 1);
+                goalParams.leftMargin = dp(10);
+
+                int goalPercent = Math.min(
+                        100,
+                        Math.round(todaySteps * 100f / Math.max(1, getDailyGoal()))
+                );
+
+                secondRow.addView(
+                        statCard("GOAL", goalPercent + "%", "Daily goal progress"),
+                        goalParams
+                );
+
+                content.addView(secondRow, matchWrap());
+
+                text("Steps per minute", 20, 0xFFFFFFFF, true, 26);
+                text("See when you were most active today.",
+                        12, 0xFF9699AA, false, 5);
+
+                MaterialCardView minuteCard = card();
+                LinearLayout minuteBox = column();
+                minuteBox.setPadding(dp(16), dp(18), dp(16), dp(18));
+
+                minuteBox.addView(
+                        new MinuteStepsChartView(this, minuteData),
+                        new LinearLayout.LayoutParams(-1, dp(210))
+                );
+
+                minuteCard.addView(minuteBox);
+                content.addView(minuteCard, matchWrap());
+
+                text("Your last 7 days", 20, 0xFFFFFFFF, true, 25);
+                text("Compare your daily step counts.",
+                        12, 0xFF9699AA, false, 5);
+
+                int totalSteps = 0;
+                int bestSteps = 0;
+
+                for (DailyStats day : weeklyData) {
+                    totalSteps += Math.max(0, day.steps);
+                    bestSteps = Math.max(bestSteps, day.steps);
+                }
+
+                int averageSteps = weeklyData.isEmpty()
+                        ? 0
+                        : totalSteps / weeklyData.size();
+
+                MaterialCardView weeklyCard = card();
+                LinearLayout weeklyBox = column();
+                weeklyBox.setPadding(dp(16), dp(18), dp(16), dp(18));
+
+                weeklyBox.addView(
+                        new WeeklyStepsChartView(this, weeklyData),
+                        new LinearLayout.LayoutParams(-1, dp(210))
+                );
+
+                weeklyCard.addView(weeklyBox);
+                content.addView(weeklyCard, matchWrap());
+
+                text("Weekly summary", 20, 0xFFFFFFFF, true, 24);
+
+                MaterialCardView summaryCard = card();
+                LinearLayout summaryBox = column();
+                summaryBox.setPadding(dp(18), dp(18), dp(18), dp(18));
+
+                addInsightRow(summaryBox, "TOTAL STEPS", formatSteps(totalSteps));
+                addInsightRow(summaryBox, "DAILY AVERAGE", formatSteps(averageSteps));
+                addInsightRow(
+                        summaryBox,
+                        "BEST DAY",
+                        bestSteps > 0 ? formatSteps(bestSteps) + " steps" : "No activity yet"
+                );
+                addInsightRow(summaryBox, "DAYS WITH DATA", String.valueOf(weeklyData.size()));
+
+                summaryCard.addView(summaryBox);
+                content.addView(summaryCard, matchWrap());
+
+                MaterialButton historyButton = new MaterialButton(this);
+                historyButton.setText("VIEW WALKING HISTORY");
+                historyButton.setOnClickListener(v -> showHistory());
+                content.addView(historyButton, matchWrap());
+
+                if (minuteData.isEmpty()) {
+                    text(
+                            "Your minute-by-minute graph will appear as STRIDE records your steps. Keep daily step counting enabled.",
+                            12,
+                            0xFF9699AA,
+                            false,
+                            8
+                    );
+                }
+            });
+        });
+    }
+
+    // --------------------------------------------------
+    // INSIGHTS SUMMARY ROW
+    // --------------------------------------------------
+
+    private void addInsightRow(
+            LinearLayout parent,
+            String label,
+            String value
+    ) {
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView left = new TextView(this);
+        left.setText(label);
+        left.setTextColor(0xFF9699AA);
+        left.setTextSize(12);
+        left.setTypeface(null, Typeface.BOLD);
+
+        TextView right = new TextView(this);
+        right.setText(value);
+        right.setTextColor(0xFFFFFFFF);
+        right.setTextSize(14);
+        right.setTypeface(null, Typeface.BOLD);
+        right.setGravity(Gravity.END);
+
+        row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
+        row.addView(right, new LinearLayout.LayoutParams(-2, -2));
+
+        LinearLayout.LayoutParams params = matchWrap();
+        params.bottomMargin = dp(18);
+        parent.addView(row, params);
+    }
+
+    // --------------------------------------------------
+    // MINUTE-WISE STEP GRAPH
+    // --------------------------------------------------
+
+    private class MinuteStepsChartView extends View {
+
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final List<StepMinute> data;
+
+        MinuteStepsChartView(Context context, List<StepMinute> data) {
+            super(context);
+            this.data = data;
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+
+            float width = getWidth();
+            float height = getHeight();
+            float left = dp(35);
+            float right = width - dp(10);
+            float top = dp(20);
+            float bottom = height - dp(35);
+            float chartWidth = right - left;
+            float chartHeight = bottom - top;
+
+            if (data == null || data.isEmpty()) {
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(0xFF9699AA);
+                paint.setTextSize(dp(11));
+                paint.setTextAlign(Paint.Align.CENTER);
+                canvas.drawText(
+                        "Start walking to generate your graph",
+                        width / 2f,
+                        height / 2f,
+                        paint
+                );
+                return;
+            }
+
+            int maxSteps = 0;
+            for (StepMinute minute : data) {
+                maxSteps = Math.max(maxSteps, minute.steps);
+            }
+            maxSteps = Math.max(10, maxSteps);
+
+            // Horizontal guide lines and Y-axis values.
+            for (int i = 0; i <= 4; i++) {
+                float y = top + chartHeight * i / 4f;
+                paint.setColor(0xFF292B39);
+                paint.setStrokeWidth(dp(1));
+                canvas.drawLine(left, y, right, y, paint);
+
+                paint.setColor(0xFF9699AA);
+                paint.setTextSize(dp(9));
+                paint.setTextAlign(Paint.Align.RIGHT);
+                canvas.drawText(
+                        String.valueOf(Math.round(maxSteps * (4 - i) / 4f)),
+                        left - dp(7),
+                        y + dp(4),
+                        paint
+                );
+            }
+
+            // Use the local calendar day containing the records.
+            java.util.Calendar calendar = java.util.Calendar.getInstance();
+            calendar.setTimeInMillis(data.get(0).minuteStartMillis);
+            calendar.set(java.util.Calendar.HOUR_OF_DAY, 0);
+            calendar.set(java.util.Calendar.MINUTE, 0);
+            calendar.set(java.util.Calendar.SECOND, 0);
+            calendar.set(java.util.Calendar.MILLISECOND, 0);
+            long midnight = calendar.getTimeInMillis();
+
+            float previousX = -1f;
+            float previousY = -1f;
+
+            paint.setColor(0xFF9875FF);
+            paint.setStrokeWidth(dp(3));
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStyle(Paint.Style.STROKE);
+
+            for (StepMinute minute : data) {
+                float minuteOfDay =
+                        (minute.minuteStartMillis - midnight) / 60000f;
+
+                float x = left + (minuteOfDay / 1440f) * chartWidth;
+                float y = bottom - (minute.steps / (float) maxSteps) * chartHeight;
+
+                // Break the line across long gaps so idle hours aren't misleadingly connected.
+                if (previousX >= 0 && x - previousX <= chartWidth * (5f / 1440f)) {
+                    canvas.drawLine(previousX, previousY, x, y, paint);
+                }
+
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(0xFFA78BFA);
+                canvas.drawCircle(x, y, dp(3), paint);
+
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setColor(0xFF9875FF);
+
+                previousX = x;
+                previousY = y;
+            }
+
+            // Time labels.
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(0xFF9699AA);
+            paint.setTextAlign(Paint.Align.CENTER);
+            paint.setTextSize(dp(9));
+
+            String[] labels = {"12 AM", "6 AM", "12 PM", "6 PM", "12 AM"};
+            for (int i = 0; i < labels.length; i++) {
+                float x = left + chartWidth * i / 4f;
+                canvas.drawText(labels[i], x, height - dp(8), paint);
+            }
+        }
+    }
+
+    // --------------------------------------------------
+    // WEEKLY STEP GRAPH
+    // --------------------------------------------------
+
+    private class WeeklyStepsChartView extends View {
+
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final List<DailyStats> data;
+
+        WeeklyStepsChartView(Context context, List<DailyStats> data) {
+            super(context);
+            this.data = data;
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+
+            float width = getWidth();
+            float height = getHeight();
+            float left = dp(12);
+            float top = dp(25);
+            float bottom = height - dp(35);
+            float chartHeight = bottom - top;
+
+            if (data == null || data.isEmpty()) {
+                paint.setColor(0xFF9699AA);
+                paint.setTextSize(dp(11));
+                paint.setTextAlign(Paint.Align.CENTER);
+                canvas.drawText(
+                        "Your weekly activity will appear here",
+                        width / 2f,
+                        height / 2f,
+                        paint
+                );
+                return;
+            }
+
+            int maxSteps = 0;
+            for (DailyStats day : data) {
+                maxSteps = Math.max(maxSteps, day.steps);
+            }
+            maxSteps = Math.max(1000, maxSteps);
+
+            int count = Math.min(7, data.size());
+            float availableWidth = width - left - dp(10);
+            float slotWidth = availableWidth / 7f;
+
+            // DAO returns newest first; reverse for chronological display.
+            for (int i = 0; i < count; i++) {
+                DailyStats day = data.get(count - 1 - i);
+                float centerX = left + slotWidth * (i + 0.5f);
+                float barHeight = (day.steps / (float) maxSteps) * chartHeight;
+                float barTop = bottom - barHeight;
+
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(i == count - 1 ? 0xFF38BDF8 : 0xFF9875FF);
+
+                RectF bar = new RectF(
+                        centerX - dp(10),
+                        barTop,
+                        centerX + dp(10),
+                        bottom
+                );
+                canvas.drawRoundRect(bar, dp(7), dp(7), paint);
+
+                paint.setColor(0xFFB5B5C5);
+                paint.setTextSize(dp(9));
+                paint.setTextAlign(Paint.Align.CENTER);
+
+                String value = day.steps >= 1000
+                        ? String.format(Locale.getDefault(), "%.1fk", day.steps / 1000f)
+                        : String.valueOf(day.steps);
+
+                canvas.drawText(value, centerX, Math.max(top - dp(7), barTop - dp(7)), paint);
+
+                paint.setColor(0xFF9699AA);
+                paint.setTextSize(dp(9));
+                canvas.drawText(getShortDateLabel(day.dateKey), centerX, height - dp(10), paint);
+            }
+        }
+    }
+
+    // --------------------------------------------------
+    // SHORT DATE LABEL FOR WEEKLY CHART
+    // --------------------------------------------------
+
+    private String getShortDateLabel(String dateKey) {
+
+        if (dateKey == null || dateKey.length() < 5) return "--";
+
+        // Supports both yyyy-MM-dd and yyyyMMdd date keys.
+        if (dateKey.length() >= 10 && dateKey.charAt(4) == '-') {
+            return dateKey.substring(5, 10);
+        }
+
+        if (dateKey.length() == 8) {
+            return dateKey.substring(4, 6) + "/" + dateKey.substring(6, 8);
+        }
+
+        return dateKey.substring(Math.max(0, dateKey.length() - 5));
     }
 
     // --------------------------------------------------
@@ -1775,161 +3076,309 @@ public class MainActivity extends AppCompatActivity {
     private void showProfile() {
 
         content.removeAllViews();
-
         header();
 
-        text(
-                "Your profile",
-                28,
-                0xFFFFFFFF,
-                true,
-                20
+        text("Your profile", 28, 0xFFFFFFFF, true, 20);
+
+        SharedPreferences prefs = getSharedPreferences(
+                "stride_settings",
+                MODE_PRIVATE
         );
 
-        SharedPreferences prefs =
-                getSharedPreferences(
-                        "stride_settings",
-                        MODE_PRIVATE
-                );
+        // PERSONAL FITNESS PROFILE
+        MaterialCardView fitnessCard = card();
+        LinearLayout fitnessBox = column();
+        fitnessBox.setPadding(dp(18), dp(18), dp(18), dp(18));
+
+        textIn(fitnessBox, "PERSONAL FITNESS", 11,
+                0xFFB7A0FF, true, 0);
+
+        textIn(fitnessBox, "Your body. Your goals.", 19,
+                0xFFFFFFFF, true, 8);
+
+        int goal = getDailyGoal();
+        int height = prefs.getInt("height_cm", 0);
+        float weight = prefs.getFloat("weight_kg", 0f);
+        int age = prefs.getInt("age_years", 0);
+
+        String heightText = height > 0 ? height + " cm" : "Not set";
+        String weightText = weight > 0
+                ? String.format(Locale.getDefault(), "%.1f kg", weight)
+                : "Not set";
+        String ageText = age > 0 ? age + " years" : "Not set";
+
+        textIn(fitnessBox, "Daily step goal     " +
+                        String.format(Locale.getDefault(), "%,d steps", goal),
+                14, 0xFFFFFFFF, false, 16);
+
+        textIn(fitnessBox, "Height     " + heightText,
+                14, 0xFFBFC1CF, false, 12);
+
+        textIn(fitnessBox, "Weight     " + weightText,
+                14, 0xFFBFC1CF, false, 12);
+
+        textIn(fitnessBox, "Age     " + ageText,
+                14, 0xFFBFC1CF, false, 12);
+
+        MaterialButton editProfile = new MaterialButton(this);
+        editProfile.setText("EDIT FITNESS PROFILE");
+        editProfile.setOnClickListener(v -> showFitnessProfileDialog());
+
+        LinearLayout.LayoutParams editParams = matchWrap();
+        editParams.topMargin = dp(16);
+        fitnessBox.addView(editProfile, editParams);
+
+        fitnessCard.addView(fitnessBox);
+        content.addView(fitnessCard);
+
+        // AUTOMATIC GPS TRACKING
+        MaterialCardView trackingCard = card();
+        LinearLayout trackingBox = column();
+        trackingBox.setPadding(dp(18), dp(16), dp(18), dp(16));
+
+        textIn(trackingBox, "ACTIVITY TRACKING", 11,
+                0xFFB7A0FF, true, 0);
 
         Switch auto = new Switch(this);
-
-        auto.setText(
-                "Optional automatic GPS location tracking"
-        );
-
+        auto.setText("Automatic GPS tracking");
         auto.setTextColor(0xFFFFFFFF);
+        auto.setChecked(prefs.getBoolean("auto_mode", false));
 
-        auto.setChecked(
-                prefs.getBoolean("auto_mode", false)
-        );
+        LinearLayout.LayoutParams switchParams = matchWrap();
+        switchParams.topMargin = dp(10);
+        trackingBox.addView(auto, switchParams);
 
-        content.addView(auto);
+        textIn(trackingBox,
+                "Daily step counting works independently. GPS tracking records routes and can use more battery.",
+                13, 0xFF9699AA, false, 8);
 
-        text(
-                "Daily step counting works independently. This option controls automatic GPS activity tracking, which can use more battery.",
-                13,
-                0xFF9699AA,
-                false,
-                18
-        );
+        trackingCard.addView(trackingBox);
+        content.addView(trackingCard);
 
-        auto.setOnCheckedChangeListener(
-                (button, checked) -> {
+        auto.setOnCheckedChangeListener((button, checked) -> {
 
-                    Intent i = new Intent(
-                            this,
-                            TrackingService.class
-                    );
+            Intent i = new Intent(this, TrackingService.class);
 
-                    if (checked) {
+            if (checked) {
 
-                        if (ContextCompat.checkSelfPermission(
-                                this,
-                                Manifest.permission.ACCESS_FINE_LOCATION
-                        ) != PackageManager.PERMISSION_GRANTED) {
+                if (ContextCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.ACCESS_FINE_LOCATION
+                ) != PackageManager.PERMISSION_GRANTED) {
 
-                            auto.setChecked(false);
-
-                            requestTrackingPermissions();
-
-                            toast(
-                                    "Grant location permission first."
-                            );
-
-                            return;
-                        }
-
-                        prefs.edit()
-                                .putBoolean("auto_mode", true)
-                                .apply();
-
-                        i.setAction(
-                                TrackingService.ACTION_AUTO_ON
-                        );
-
-                        ContextCompat.startForegroundService(
-                                this,
-                                i
-                        );
-
-                    } else {
-
-                        prefs.edit()
-                                .putBoolean("auto_mode", false)
-                                .apply();
-
-                        i.setAction(
-                                TrackingService.ACTION_AUTO_OFF
-                        );
-
-                        startService(i);
-                    }
+                    auto.setChecked(false);
+                    requestTrackingPermissions();
+                    toast("Grant location permission first.");
+                    return;
                 }
-        );
 
+                prefs.edit().putBoolean("auto_mode", true).apply();
+                i.setAction(TrackingService.ACTION_AUTO_ON);
+                ContextCompat.startForegroundService(this, i);
+
+            } else {
+
+                prefs.edit().putBoolean("auto_mode", false).apply();
+                i.setAction(TrackingService.ACTION_AUTO_OFF);
+                startService(i);
+            }
+        });
+
+        // LOCAL ACTIVITY DATA
         MaterialButton privacy = new MaterialButton(this);
-
-        privacy.setText(
-                "DELETE LOCAL ACTIVITY DATA"
-        );
+        privacy.setText("DELETE LOCAL ACTIVITY DATA");
 
         privacy.setOnClickListener(v ->
-
                 new androidx.appcompat.app.AlertDialog.Builder(this)
-
                         .setTitle("Delete activity data?")
-
                         .setMessage(
-                                "This permanently deletes locally saved walks and activity totals."
+                                "This permanently deletes locally saved walks and activity totals. Your fitness profile will remain saved."
                         )
-
                         .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Delete", (d, w) -> {
 
-                        .setPositiveButton(
-                                "Delete",
-                                (d, w) -> {
+                            io.execute(() -> {
 
-                                    io.execute(() -> {
+                                StrideDatabase.get(this).clearAllTables();
 
-                                        StrideDatabase.get(this)
-                                                .clearAllTables();
+                                getSharedPreferences(
+                                        "stride_step_state",
+                                        MODE_PRIVATE
+                                ).edit().clear().apply();
 
-                                        getSharedPreferences(
-                                                "stride_step_state",
-                                                MODE_PRIVATE
-                                        ).edit().clear().apply();
+                                getSharedPreferences(
+                                        "stride_milestones",
+                                        MODE_PRIVATE
+                                ).edit().clear().apply();
 
-                                        getSharedPreferences(
-                                                "stride_milestones",
-                                                MODE_PRIVATE
-                                        ).edit().clear().apply();
+                                runOnUiThread(() -> {
 
-                                        runOnUiThread(() -> {
+                                    if (isFinishing() || isDestroyed()) return;
 
-                                            todaySteps = 0;
-                                            liveSteps = 0;
-                                            liveDistance = 0;
+                                    todaySteps = 0;
+                                    liveSteps = 0;
+                                    liveDistance = 0;
 
-                                            milestoneStateInitialized = false;
-                                            milestoneDateKey = "";
+                                    milestoneStateInitialized = false;
+                                    milestoneDateKey = "";
 
-                                            initializeMilestoneState();
+                                    initializeMilestoneState();
+                                    updateDashboardValues();
+                                    showProfile();
 
-                                            updateDashboardValues();
-
-                                            toast(
-                                                    "Local activity data deleted"
-                                            );
-                                        });
-                                    });
-                                }
-                        )
-
+                                    toast("Local activity data deleted");
+                                });
+                            });
+                        })
                         .show()
         );
 
         content.addView(privacy);
+    }
+
+    // --------------------------------------------------
+    // FITNESS PROFILE EDITOR
+    // --------------------------------------------------
+
+    private void showFitnessProfileDialog() {
+
+        SharedPreferences prefs = getSharedPreferences(
+                "stride_settings",
+                MODE_PRIVATE
+        );
+
+        LinearLayout form = column();
+        form.setPadding(dp(20), dp(8), dp(20), dp(8));
+
+        EditText goalInput = fitnessInput(
+                "Daily step goal",
+                String.valueOf(getDailyGoal()),
+                false
+        );
+
+        int savedHeight = prefs.getInt("height_cm", 0);
+        float savedWeight = prefs.getFloat("weight_kg", 0f);
+        int savedAge = prefs.getInt("age_years", 0);
+
+        EditText heightInput = fitnessInput(
+                "Height in cm",
+                savedHeight == 0 ? "" : String.valueOf(savedHeight),
+                false
+        );
+
+        EditText weightInput = fitnessInput(
+                "Weight in kg",
+                savedWeight == 0f ? "" : String.valueOf(savedWeight),
+                true
+        );
+
+        EditText ageInput = fitnessInput(
+                "Age in years",
+                savedAge == 0 ? "" : String.valueOf(savedAge),
+                false
+        );
+
+        addFitnessField(form, "DAILY STEP GOAL", goalInput);
+        addFitnessField(form, "HEIGHT (CM)", heightInput);
+        addFitnessField(form, "WEIGHT (KG)", weightInput);
+        addFitnessField(form, "AGE", ageInput);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(form);
+
+        androidx.appcompat.app.AlertDialog dialog =
+                new androidx.appcompat.app.AlertDialog.Builder(this)
+                        .setTitle("Fitness profile")
+                        .setView(scroll)
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Save", null)
+                        .create();
+
+        dialog.setOnShowListener(ignored ->
+                dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
+                        .setOnClickListener(v -> {
+
+                            try {
+
+                                String goalText = goalInput.getText().toString().trim();
+                                String heightText = heightInput.getText().toString().trim();
+                                String weightText = weightInput.getText().toString().trim();
+                                String ageText = ageInput.getText().toString().trim();
+
+                                int goal = Integer.parseInt(goalText);
+                                int height = heightText.isEmpty()
+                                        ? 0 : Integer.parseInt(heightText);
+                                float weight = weightText.isEmpty()
+                                        ? 0f : Float.parseFloat(weightText);
+                                int age = ageText.isEmpty()
+                                        ? 0 : Integer.parseInt(ageText);
+
+                                if (goal < 1000 || goal > 100000 ||
+                                        (height != 0 && (height < 80 || height > 250)) ||
+                                        (weight != 0f && (weight < 20f || weight > 300f)) ||
+                                        (age != 0 && (age < 5 || age > 110))) {
+
+                                    toast("Please enter valid fitness details.");
+                                    return;
+                                }
+
+                                prefs.edit()
+                                        .putInt("fitness_goal", goal)
+                                        .putInt("height_cm", height)
+                                        .putFloat("weight_kg", weight)
+                                        .putInt("age_years", age)
+                                        .apply();
+
+                                dialog.dismiss();
+                                showProfile();
+                                updateDashboardValues();
+                                toast("Fitness profile saved");
+
+                            } catch (NumberFormatException e) {
+                                toast("Please check the entered values.");
+                            }
+                        })
+        );
+
+        dialog.show();
+    }
+
+    private EditText fitnessInput(
+            String hint,
+            String value,
+            boolean decimal
+    ) {
+
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(value);
+        input.setHint(hint);
+        input.setTextColor(0xFFFFFFFF);
+        input.setHintTextColor(0xFF77798A);
+        input.setPadding(dp(12), dp(10), dp(12), dp(10));
+        input.setBackground(round(0xFF202231, 0xFF34364A, 12));
+
+        input.setInputType(
+                android.text.InputType.TYPE_CLASS_NUMBER |
+                        (decimal
+                                ? android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+                                : 0)
+        );
+
+        return input;
+    }
+
+    private void addFitnessField(
+            LinearLayout parent,
+            String label,
+            EditText input
+    ) {
+
+        textIn(parent, label, 10, 0xFF9699AA, true, 14);
+
+        LinearLayout.LayoutParams params = matchWrap();
+        params.topMargin = dp(6);
+        parent.addView(input, params);
     }
 
     // --------------------------------------------------
@@ -1973,6 +3422,8 @@ public class MainActivity extends AppCompatActivity {
 
         if ("DISTANCE".equals(title)) {
             distanceValue = valueText;
+        } else if ("CALORIES".equals(title)) {
+            caloriesValue = valueText;
         }
 
         textIn(
@@ -2228,6 +3679,13 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+
+        if (fireworkDialog != null &&
+                fireworkDialog.isShowing()) {
+
+            fireworkDialog.dismiss();
+            fireworkDialog = null;
+        }
 
         milestoneOrbit = null;
 

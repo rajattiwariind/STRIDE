@@ -1,4 +1,3 @@
-
 package com.stride.app.tracking;
 
 import android.Manifest;
@@ -30,6 +29,7 @@ import com.stride.app.MainActivity;
 import com.stride.app.data.DailyStats;
 import com.stride.app.data.RoutePoint;
 import com.stride.app.data.StrideDatabase;
+import com.stride.app.data.StepMinute;
 import com.stride.app.data.WalkSession;
 import com.stride.app.utils.DateUtils;
 
@@ -88,11 +88,34 @@ public class TrackingService extends Service
     private boolean dailyStateReady = false;
 
     private long startedAt;
-    private long sessionStepsStart = -1;
-    private long lastSensorTotal = -1;
+    private long sessionStepsStart = 0;
 
     private int currentSteps = 0;
     private int todaySteps = 0;
+
+    // --------------------------------------------------
+    // STEP DETECTION FILTER
+    // --------------------------------------------------
+
+    private static final float STEP_PEAK_THRESHOLD = 1.35f;
+
+    private static final long MIN_STEP_INTERVAL_MS = 300;
+    private static final long MAX_STEP_INTERVAL_MS = 1400;
+
+    private static final long MAX_CADENCE_VARIATION_MS = 450;
+
+    private float gravityMagnitude = 9.81f;
+
+    private float previousAbsLinear = 0f;
+    private float olderAbsLinear = 0f;
+
+    private long previousSampleTime = 0L;
+    private long olderSampleTime = 0L;
+
+    private long lastCandidatePeakTime = 0L;
+    private long previousCandidateInterval = 0L;
+
+    private int cadenceCandidateCount = 0;
 
     private double distanceMeters = 0;
 
@@ -102,11 +125,17 @@ public class TrackingService extends Service
 
     private SharedPreferences stepPrefs;
 
+    // --------------------------------------------------
+    // ON CREATE
+    // --------------------------------------------------
+
     @Override
     public void onCreate() {
+
         super.onCreate();
 
         io = Executors.newSingleThreadExecutor();
+
         mainHandler = new Handler(Looper.getMainLooper());
 
         fused = LocationServices.getFusedLocationProviderClient(this);
@@ -114,8 +143,9 @@ public class TrackingService extends Service
         sensorManager = (SensorManager)
                 getSystemService(SENSOR_SERVICE);
 
+        // Use accelerometer-based detection with cadence filtering.
         stepSensor = sensorManager.getDefaultSensor(
-                Sensor.TYPE_STEP_COUNTER
+                Sensor.TYPE_ACCELEROMETER
         );
 
         stepPrefs = getSharedPreferences(
@@ -125,7 +155,7 @@ public class TrackingService extends Service
 
         createChannel();
 
-        // Load saved daily state before registering the sensor.
+        // Load saved daily steps before registering the sensor.
         io.execute(() -> {
 
             String today = DateUtils.todayKey();
@@ -141,22 +171,18 @@ public class TrackingService extends Service
                     ? stepPrefs.getInt("daily_steps", 0)
                     : (stats == null ? 0 : stats.steps);
 
-            long savedSensorTotal = stepPrefs.getLong(
-                    "last_sensor_total",
-                    -1
-            );
-
             mainHandler.post(() -> {
 
                 todaySteps = savedSteps;
-                lastSensorTotal = savedSensorTotal;
+
                 dailyStateReady = true;
 
                 if (stepSensor != null) {
+
                     sensorManager.registerListener(
                             this,
                             stepSensor,
-                            SensorManager.SENSOR_DELAY_NORMAL
+                            SensorManager.SENSOR_DELAY_UI
                     );
                 }
 
@@ -164,6 +190,10 @@ public class TrackingService extends Service
             });
         });
     }
+
+    // --------------------------------------------------
+    // START COMMAND
+    // --------------------------------------------------
 
     @Override
     public int onStartCommand(
@@ -179,7 +209,9 @@ public class TrackingService extends Service
         if (ACTION_ENABLE_DAILY.equals(action)) {
 
             dailyMode = true;
+
             startForegroundServiceNotification(false);
+
             sendUpdate();
 
         } else if (ACTION_START.equals(action)) {
@@ -310,11 +342,17 @@ public class TrackingService extends Service
 
         startedAt = System.currentTimeMillis();
 
-        sessionStepsStart = -1;
+        sessionStepsStart = todaySteps;
+
         currentSteps = 0;
         distanceMeters = 0;
 
+        cadenceCandidateCount = 0;
+        lastCandidatePeakTime = 0L;
+        previousCandidateInterval = 0L;
+
         lastLocation = null;
+
         routePoints.clear();
 
         sessionTitle = automatic
@@ -324,6 +362,7 @@ public class TrackingService extends Service
         startForegroundServiceNotification(true);
 
         requestLocationUpdates();
+
         sendUpdate();
     }
 
@@ -417,6 +456,7 @@ public class TrackingService extends Service
         } catch (SecurityException e) {
 
             tracking = false;
+
             startForegroundServiceNotification(false);
         }
     }
@@ -428,78 +468,194 @@ public class TrackingService extends Service
     @Override
     public void onSensorChanged(SensorEvent event) {
 
-        if (!dailyStateReady || event.sensor.getType()
-                != Sensor.TYPE_STEP_COUNTER) {
+        if (!dailyStateReady
+                || event.sensor.getType() != Sensor.TYPE_ACCELEROMETER) {
             return;
         }
 
-        long sensorTotal = Math.round(event.values[0]);
+        long sampleTime = event.timestamp / 1_000_000L;
+
+        float x = event.values[0];
+        float y = event.values[1];
+        float z = event.values[2];
+
+        float magnitude = (float) Math.sqrt(
+                x * x + y * y + z * z
+        );
+
+        // Smooth gravity and subtract it from the measured magnitude.
+        gravityMagnitude =
+                0.90f * gravityMagnitude + 0.10f * magnitude;
+
+        float linearAcceleration = magnitude - gravityMagnitude;
+
+        float absoluteLinear = Math.abs(linearAcceleration);
+
+        // Identify a local peak using three consecutive samples.
+        if (previousSampleTime > 0L
+                && olderSampleTime > 0L
+                && previousAbsLinear > olderAbsLinear
+                && previousAbsLinear >= absoluteLinear
+                && previousAbsLinear >= STEP_PEAK_THRESHOLD) {
+
+            processStepCandidate(previousSampleTime);
+        }
+
+        olderAbsLinear = previousAbsLinear;
+        olderSampleTime = previousSampleTime;
+
+        previousAbsLinear = absoluteLinear;
+        previousSampleTime = sampleTime;
+    }
+
+    /**
+     * Require three peaks with a plausible and reasonably stable cadence
+     * before counting steps. Once walking is confirmed, count each next
+     * regular peak.
+     */
+    private void processStepCandidate(long peakTime) {
+
+        if (lastCandidatePeakTime == 0L) {
+
+            lastCandidatePeakTime = peakTime;
+
+            cadenceCandidateCount = 1;
+
+            previousCandidateInterval = 0L;
+
+            return;
+        }
+
+        long interval = peakTime - lastCandidatePeakTime;
+
+        if (interval < MIN_STEP_INTERVAL_MS
+                || interval > MAX_STEP_INTERVAL_MS) {
+
+            lastCandidatePeakTime = peakTime;
+
+            cadenceCandidateCount = 1;
+
+            previousCandidateInterval = 0L;
+
+            return;
+        }
+
+        if (previousCandidateInterval > 0L
+                && Math.abs(interval - previousCandidateInterval)
+                > MAX_CADENCE_VARIATION_MS) {
+
+            lastCandidatePeakTime = peakTime;
+
+            cadenceCandidateCount = 1;
+
+            previousCandidateInterval = 0L;
+
+            return;
+        }
+
+        lastCandidatePeakTime = peakTime;
+
+        previousCandidateInterval = interval;
+
+        cadenceCandidateCount++;
+
+        if (cadenceCandidateCount == 3) {
+
+            addConfirmedSteps(3);
+
+        } else if (cadenceCandidateCount > 3) {
+
+            addConfirmedSteps(1);
+        }
+    }
+
+    // --------------------------------------------------
+    // ADD CONFIRMED STEPS
+    // --------------------------------------------------
+
+    private void addConfirmedSteps(int amount) {
+
+        if (amount <= 0) {
+            return;
+        }
 
         String today = DateUtils.todayKey();
 
-        int delta = 0;
-
-        if (lastSensorTotal >= 0) {
-
-            if (sensorTotal >= lastSensorTotal) {
-
-                delta = (int) Math.min(
-                        sensorTotal - lastSensorTotal,
-                        Integer.MAX_VALUE
-                );
-
-            } else {
-
-                // Sensor counter reset, usually after device reboot.
-                delta = (int) Math.min(
-                        sensorTotal,
-                        Integer.MAX_VALUE
-                );
-            }
-        }
-
-        // New day: reset the daily count, but retain
-        // the sensor difference since the previous reading.
         String savedDate = stepPrefs.getString(
                 "date",
                 ""
         );
 
         if (!today.equals(savedDate)) {
+
             todaySteps = 0;
+
+            cadenceCandidateCount = 0;
+
+            lastCandidatePeakTime = 0L;
+
+            previousCandidateInterval = 0L;
         }
 
-        todaySteps += delta;
-        lastSensorTotal = sensorTotal;
+        todaySteps += amount;
 
         stepPrefs.edit()
                 .putString("date", today)
                 .putInt("daily_steps", todaySteps)
-                .putLong("last_sensor_total", lastSensorTotal)
                 .apply();
 
-        // Session steps are separate from daily steps.
         if (tracking) {
-
-            if (sessionStepsStart < 0) {
-                sessionStepsStart = sensorTotal;
-            }
 
             currentSteps = Math.max(
                     0,
-                    (int) Math.round(
-                            sensorTotal - sessionStepsStart
-                    )
+                    todaySteps - (int) sessionStepsStart
             );
         }
 
+        // Save the confirmed steps into the current minute bucket.
+        // This powers the steps-per-minute graph in Insights.
+        final int stepsToSave = amount;
+        final String minuteDate = today;
+        final long minuteStart =
+                (System.currentTimeMillis() / 60000L) * 60000L;
+
+        io.execute(() -> {
+
+            StrideDatabase db = StrideDatabase.get(
+                    getApplicationContext()
+            );
+
+            StepMinute existing = db.strideDao().getStepMinute(
+                    minuteDate,
+                    minuteStart
+            );
+
+            int minuteSteps = existing == null
+                    ? stepsToSave
+                    : existing.steps + stepsToSave;
+
+            db.strideDao().upsertStepMinute(
+                    new StepMinute(
+                            minuteDate,
+                            minuteStart,
+                            minuteSteps
+                    )
+            );
+        });
+
         saveDailySteps();
+
         sendUpdate();
     }
+
+    // --------------------------------------------------
+    // SAVE DAILY STEPS
+    // --------------------------------------------------
 
     private void saveDailySteps() {
 
         final int steps = todaySteps;
+
         final String day = DateUtils.todayKey();
 
         io.execute(() -> {
@@ -551,6 +707,7 @@ public class TrackingService extends Service
         if (locationCallback != null) {
 
             fused.removeLocationUpdates(locationCallback);
+
             locationCallback = null;
         }
 
@@ -637,7 +794,9 @@ public class TrackingService extends Service
         });
 
         currentSteps = 0;
+
         distanceMeters = 0;
+
         lastLocation = null;
 
         sendUpdate();
@@ -654,7 +813,9 @@ public class TrackingService extends Service
         update.setPackage(getPackageName());
 
         update.putExtra(EXTRA_STEPS, currentSteps);
+
         update.putExtra(EXTRA_TODAY_STEPS, todaySteps);
+
         update.putExtra(EXTRA_DISTANCE, distanceMeters);
 
         if (lastLocation != null) {
