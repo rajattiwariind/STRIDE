@@ -69,25 +69,19 @@ public class MainActivity extends AppCompatActivity {
     private LinearLayout content;
 
     private TextView previousStepValue;
-    private TextView currentWalkValue;
     private TextView remainingStepValue;
     private TextView distanceValue;
     private TextView caloriesValue;
 
     private MilestoneOrbitView milestoneOrbit;
 
-    private MaterialButton walkButton;
-
-    private boolean tracking = false;
     private boolean receiverRegistered = false;
 
     private boolean milestoneStateInitialized = false;
     private String milestoneDateKey = "";
 
-    private int liveSteps = 0;
     private int todaySteps = 0;
 
-    private double liveDistance = 0;
 
     private Dialog fireworkDialog;
 
@@ -115,37 +109,6 @@ public class MainActivity extends AppCompatActivity {
             );
 
     // --------------------------------------------------
-    // WALKING PERMISSIONS
-    // --------------------------------------------------
-
-    private final ActivityResultLauncher<String[]> permissions =
-            registerForActivityResult(
-                    new ActivityResultContracts.RequestMultiplePermissions(),
-                    result -> {
-
-                        boolean location =
-                                Boolean.TRUE.equals(
-                                        result.get(Manifest.permission.ACCESS_FINE_LOCATION)
-                                ) ||
-                                        Boolean.TRUE.equals(
-                                                result.get(Manifest.permission.ACCESS_COARSE_LOCATION)
-                                        );
-
-                        if (location) {
-                            startManualTracking();
-                        } else {
-                            toast(
-                                    "Location permission is needed to record your GPS route."
-                            );
-                        }
-
-                        if (hasActivityPermission()) {
-                            startDailyStepService();
-                        }
-                    }
-            );
-
-    // --------------------------------------------------
     // TRACKING BROADCAST RECEIVER
     // --------------------------------------------------
 
@@ -162,19 +125,9 @@ public class MainActivity extends AppCompatActivity {
                         return;
                     }
 
-                    liveSteps = intent.getIntExtra(
-                            TrackingService.EXTRA_STEPS,
-                            liveSteps
-                    );
-
                     todaySteps = intent.getIntExtra(
                             TrackingService.EXTRA_TODAY_STEPS,
                             todaySteps
-                    );
-
-                    liveDistance = intent.getDoubleExtra(
-                            TrackingService.EXTRA_DISTANCE,
-                            liveDistance
                     );
 
                     updateDashboardValues();
@@ -466,22 +419,12 @@ public class MainActivity extends AppCompatActivity {
 
         previousStepValue = textIn(
                 box,
-                "Previous steps: " +
-                        formatSteps(getPreviousSteps()),
+                "Steps tracked automatically: " +
+                        formatSteps(todaySteps),
                 13,
                 0xFFB5B5C5,
                 false,
                 16
-        );
-
-        currentWalkValue = textIn(
-                box,
-                "Current walk: " +
-                        formatSteps(liveSteps),
-                13,
-                0xFFB5B5C5,
-                false,
-                8
         );
 
         remainingStepValue = textIn(
@@ -624,96 +567,6 @@ public class MainActivity extends AppCompatActivity {
         content.addView(stats);
 
         text(
-                "Your next journey",
-                19,
-                0xFFFFFFFF,
-                true,
-                25
-        );
-
-        MaterialCardView journey = card();
-
-        LinearLayout j = column();
-
-        j.setPadding(
-                dp(18),
-                dp(18),
-                dp(18),
-                dp(18)
-        );
-
-        textIn(
-                j,
-                "EXPLORE YOUR SURROUNDINGS",
-                10,
-                0xFFB7A0FF,
-                true,
-                10
-        );
-
-        textIn(
-                j,
-                "Every step tells a story.",
-                20,
-                0xFFFFFFFF,
-                true,
-                7
-        );
-
-        textIn(
-                j,
-                "Record your route and see where your walk takes you.",
-                13,
-                0xFF9699AA,
-                false,
-                16
-        );
-
-        walkButton = new MaterialButton(this);
-
-        walkButton.setText(
-                tracking
-                        ? "STOP WALKING"
-                        : "START WALKING  →"
-        );
-
-        walkButton.setTextColor(0xFFFFFFFF);
-
-        walkButton.setBackgroundTintList(
-                android.content.res.ColorStateList.valueOf(
-                        tracking
-                                ? 0xFFB64D69
-                                : 0xFF7955D9
-                )
-        );
-
-        walkButton.setCornerRadius(dp(15));
-
-        walkButton.setOnClickListener(v -> {
-
-            if (tracking) {
-
-                stopTracking();
-
-            } else {
-
-                requestTrackingPermissions();
-            }
-        });
-
-        j.addView(
-                walkButton,
-                new LinearLayout.LayoutParams(
-                        -1,
-                        dp(54)
-                )
-        );
-
-        journey.addView(j);
-
-        content.addView(journey, matchWrap());
-
-        text(
                 "Weekly activity",
                 19,
                 0xFFFFFFFF,
@@ -762,11 +615,7 @@ public class MainActivity extends AppCompatActivity {
     // --------------------------------------------------
 
     private int getPreviousSteps() {
-
-        return Math.max(
-                0,
-                todaySteps - liveSteps
-        );
+        return Math.max(0, todaySteps);
     }
 
     private int getDailyGoal() {
@@ -866,16 +715,8 @@ public class MainActivity extends AppCompatActivity {
         if (previousStepValue != null) {
 
             previousStepValue.setText(
-                    "Previous steps: " +
-                            formatSteps(getPreviousSteps())
-            );
-        }
-
-        if (currentWalkValue != null) {
-
-            currentWalkValue.setText(
-                    "Current walk: " +
-                            formatSteps(liveSteps)
+                    "Steps tracked automatically: " +
+                            formatSteps(todaySteps)
             );
         }
 
@@ -2383,136 +2224,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // --------------------------------------------------
-    // WALKING PERMISSIONS
-    // --------------------------------------------------
-
-    private void requestTrackingPermissions() {
-
-        java.util.ArrayList<String> req =
-                new java.util.ArrayList<>();
-
-        if (Build.VERSION.SDK_INT >= 29 &&
-                ContextCompat.checkSelfPermission(
-                        this,
-                        Manifest.permission.ACTIVITY_RECOGNITION
-                ) != PackageManager.PERMISSION_GRANTED) {
-
-            req.add(
-                    Manifest.permission.ACTIVITY_RECOGNITION
-            );
-        }
-
-        if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_FINE_LOCATION
-        ) != PackageManager.PERMISSION_GRANTED) {
-
-            req.add(
-                    Manifest.permission.ACCESS_FINE_LOCATION
-            );
-        }
-
-        if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-        ) != PackageManager.PERMISSION_GRANTED) {
-
-            req.add(
-                    Manifest.permission.ACCESS_COARSE_LOCATION
-            );
-        }
-
-        if (Build.VERSION.SDK_INT >= 33 &&
-                ContextCompat.checkSelfPermission(
-                        this,
-                        Manifest.permission.POST_NOTIFICATIONS
-                ) != PackageManager.PERMISSION_GRANTED) {
-
-            req.add(
-                    Manifest.permission.POST_NOTIFICATIONS
-            );
-        }
-
-        if (req.isEmpty()) {
-
-            startManualTracking();
-
-        } else {
-
-            permissions.launch(
-                    req.toArray(new String[0])
-            );
-        }
-    }
-
-    // --------------------------------------------------
-    // START WALKING
-    // --------------------------------------------------
-
-    private void startManualTracking() {
-
-        Intent i = new Intent(
-                this,
-                TrackingService.class
-        );
-
-        i.setAction(
-                TrackingService.ACTION_START
-        );
-
-        try {
-
-            ContextCompat.startForegroundService(
-                    this,
-                    i
-            );
-
-            tracking = true;
-
-            showHome();
-
-            toast("GPS walking session started");
-
-        } catch (Exception e) {
-
-            tracking = false;
-
-            toast("Unable to start walking session.");
-        }
-    }
-
-    // --------------------------------------------------
-    // STOP WALKING
-    // --------------------------------------------------
-
-    private void stopTracking() {
-
-        Intent i = new Intent(
-                this,
-                TrackingService.class
-        );
-
-        i.setAction(
-                TrackingService.ACTION_STOP
-        );
-
-        try {
-
-            startService(i);
-
-            tracking = false;
-
-            showHome();
-
-            toast("Walking session saved");
-
-        } catch (Exception e) {
-
-            toast("Unable to stop walking session.");
-        }
-    }
-
-    // --------------------------------------------------
     // LOAD DAILY STATISTICS
     // --------------------------------------------------
 
@@ -3131,58 +2842,23 @@ public class MainActivity extends AppCompatActivity {
         fitnessCard.addView(fitnessBox);
         content.addView(fitnessCard);
 
-        // AUTOMATIC GPS TRACKING
+        // AUTOMATIC DAILY TRACKING — no start button or GPS session required.
         MaterialCardView trackingCard = card();
         LinearLayout trackingBox = column();
         trackingBox.setPadding(dp(18), dp(16), dp(18), dp(16));
 
-        textIn(trackingBox, "ACTIVITY TRACKING", 11,
-                0xFFB7A0FF, true, 0);
+        textIn(trackingBox, "AUTOMATIC DAILY TRACKING", 11,
+                0xFFB7A0FF, true, 8);
 
-        Switch auto = new Switch(this);
-        auto.setText("Automatic GPS tracking");
-        auto.setTextColor(0xFFFFFFFF);
-        auto.setChecked(prefs.getBoolean("auto_mode", false));
-
-        LinearLayout.LayoutParams switchParams = matchWrap();
-        switchParams.topMargin = dp(10);
-        trackingBox.addView(auto, switchParams);
+        textIn(trackingBox, "● STEP TRACKING ENABLED", 15,
+                0xFF64D9AE, true, 8);
 
         textIn(trackingBox,
-                "Daily step counting works independently. GPS tracking records routes and can use more battery.",
-                13, 0xFF9699AA, false, 8);
+                "STRIDE counts steps in the background and saves daily steps, estimated distance, active-minute data and estimated calories. GPS is not required for these daily statistics.",
+                13, 0xFF9699AA, false, 0);
 
         trackingCard.addView(trackingBox);
         content.addView(trackingCard);
-
-        auto.setOnCheckedChangeListener((button, checked) -> {
-
-            Intent i = new Intent(this, TrackingService.class);
-
-            if (checked) {
-
-                if (ContextCompat.checkSelfPermission(
-                        this,
-                        Manifest.permission.ACCESS_FINE_LOCATION
-                ) != PackageManager.PERMISSION_GRANTED) {
-
-                    auto.setChecked(false);
-                    requestTrackingPermissions();
-                    toast("Grant location permission first.");
-                    return;
-                }
-
-                prefs.edit().putBoolean("auto_mode", true).apply();
-                i.setAction(TrackingService.ACTION_AUTO_ON);
-                ContextCompat.startForegroundService(this, i);
-
-            } else {
-
-                prefs.edit().putBoolean("auto_mode", false).apply();
-                i.setAction(TrackingService.ACTION_AUTO_OFF);
-                startService(i);
-            }
-        });
 
         // LOCAL ACTIVITY DATA
         MaterialButton privacy = new MaterialButton(this);
@@ -3211,13 +2887,16 @@ public class MainActivity extends AppCompatActivity {
                                         MODE_PRIVATE
                                 ).edit().clear().apply();
 
+                                getSharedPreferences(
+                                        "stride_daily_metrics",
+                                        MODE_PRIVATE
+                                ).edit().clear().apply();
+
                                 runOnUiThread(() -> {
 
                                     if (isFinishing() || isDestroyed()) return;
 
                                     todaySteps = 0;
-                                    liveSteps = 0;
-                                    liveDistance = 0;
 
                                     milestoneStateInitialized = false;
                                     milestoneDateKey = "";

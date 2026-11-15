@@ -206,7 +206,13 @@ public class TrackingService extends Service
                 ? ""
                 : intent.getAction();
 
-        if (ACTION_ENABLE_DAILY.equals(action)) {
+        // START_STICKY can restart the service with a null Intent.
+        // Restore the daily-only mode instead of leaving it without a foreground notification.
+        if (action == null || action.isEmpty()) {
+            dailyMode = true;
+            startForegroundServiceNotification(false);
+            sendUpdate();
+        } else if (ACTION_ENABLE_DAILY.equals(action)) {
 
             dailyMode = true;
 
@@ -460,7 +466,6 @@ public class TrackingService extends Service
             startForegroundServiceNotification(false);
         }
     }
-
     // --------------------------------------------------
     // AUTOMATIC DAILY STEP COUNTING
     // --------------------------------------------------
@@ -652,11 +657,62 @@ public class TrackingService extends Service
     // SAVE DAILY STEPS
     // --------------------------------------------------
 
+    private double getEstimatedStepLengthMeters() {
+
+        SharedPreferences profile = getSharedPreferences(
+                "stride_settings",
+                MODE_PRIVATE
+        );
+
+        int heightCm = profile.getInt("height_cm", 0);
+
+        // 0.414 x height is a common walking step-length estimate.
+        // Fall back to 0.72 m when height is not provided.
+        return heightCm > 0
+                ? (heightCm / 100.0) * 0.414
+                : 0.72;
+    }
+
+    private double getEstimatedDistanceMeters(int steps) {
+        return Math.max(0, steps) * getEstimatedStepLengthMeters();
+    }
+
+    private double getEstimatedCalories(int steps) {
+
+        SharedPreferences profile = getSharedPreferences(
+                "stride_settings",
+                MODE_PRIVATE
+        );
+
+        float weightKg = profile.getFloat("weight_kg", 0f);
+
+        if (weightKg <= 0f) {
+            return 0;
+        }
+
+        double distanceKm = getEstimatedDistanceMeters(steps) / 1000.0;
+
+        // Approximation only: weight x kilometres x 0.5.
+        return weightKg * distanceKm * 0.5;
+    }
+
     private void saveDailySteps() {
 
         final int steps = todaySteps;
-
         final String day = DateUtils.todayKey();
+        final double estimatedDistance = getEstimatedDistanceMeters(steps);
+        final double estimatedCalories = getEstimatedCalories(steps);
+
+        // Persist the daily estimates separately as well, keyed by date.
+        // Calories remain estimates and are only meaningful when weight is set.
+        getSharedPreferences(
+                "stride_daily_metrics",
+                MODE_PRIVATE
+        ).edit()
+                .putString("date", day)
+                .putFloat("distance_meters_" + day, (float) estimatedDistance)
+                .putFloat("calories_kcal_" + day, (float) estimatedCalories)
+                .apply();
 
         io.execute(() -> {
 
@@ -666,20 +722,26 @@ public class TrackingService extends Service
 
             DailyStats old = db.strideDao().getDailyStats(day);
 
-            double distance = old == null
-                    ? 0
-                    : old.distanceMeters;
+            // Count active minutes from the minute buckets written by the
+            // accelerometer step detector. No GPS session is required.
+            List<StepMinute> minuteRows =
+                    db.strideDao().getStepMinutesForDay(day);
 
-            int minutes = old == null
-                    ? 0
-                    : old.minutes;
+            int activeMinutes = 0;
 
+            for (StepMinute minute : minuteRows) {
+                if (minute.steps > 0) {
+                    activeMinutes++;
+                }
+            }
+
+            // DailyStats stores steps, estimated distance and active minutes.
             db.strideDao().upsertDailyStats(
                     new DailyStats(
                             day,
                             steps,
-                            distance,
-                            minutes
+                            estimatedDistance,
+                            activeMinutes
                     )
             );
         });
@@ -816,7 +878,10 @@ public class TrackingService extends Service
 
         update.putExtra(EXTRA_TODAY_STEPS, todaySteps);
 
-        update.putExtra(EXTRA_DISTANCE, distanceMeters);
+        update.putExtra(
+                EXTRA_DISTANCE,
+                getEstimatedDistanceMeters(todaySteps)
+        );
 
         if (lastLocation != null) {
 
