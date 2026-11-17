@@ -1,3 +1,4 @@
+
 package com.stride.app.tracking;
 
 import android.Manifest;
@@ -44,19 +45,14 @@ public class TrackingService extends Service
 
     public static final String ACTION_ENABLE_DAILY =
             "com.stride.app.ENABLE_DAILY";
-
     public static final String ACTION_START =
             "com.stride.app.START";
-
     public static final String ACTION_STOP =
             "com.stride.app.STOP";
-
     public static final String ACTION_AUTO_ON =
             "com.stride.app.AUTO_ON";
-
     public static final String ACTION_AUTO_OFF =
             "com.stride.app.AUTO_OFF";
-
     public static final String ACTION_UPDATE =
             "com.stride.app.UPDATE";
 
@@ -74,13 +70,16 @@ public class TrackingService extends Service
     private LocationCallback locationCallback;
 
     private SensorManager sensorManager;
-    private Sensor stepSensor;
+
+    private Sensor stepCounterSensor;
+    private Sensor stepDetectorSensor;
+    private Sensor accelerometerSensor;
+    private Sensor activeSensor;
 
     private ExecutorService io;
     private Handler mainHandler;
 
-    private final List<RoutePoint> routePoints =
-            new ArrayList<>();
+    private final List<RoutePoint> routePoints = new ArrayList<>();
 
     private boolean tracking = false;
     private boolean dailyMode = false;
@@ -93,49 +92,37 @@ public class TrackingService extends Service
     private int currentSteps = 0;
     private int todaySteps = 0;
 
-    // --------------------------------------------------
-    // STEP DETECTION FILTER
-    // --------------------------------------------------
+    private double distanceMeters = 0;
 
-    private static final float STEP_PEAK_THRESHOLD = 1.35f;
+    private Location lastLocation;
+    private String sessionTitle = "Walking session";
 
-    private static final long MIN_STEP_INTERVAL_MS = 300;
-    private static final long MAX_STEP_INTERVAL_MS = 1400;
+    private SharedPreferences stepPrefs;
 
-    private static final long MAX_CADENCE_VARIATION_MS = 450;
+    // Accelerometer fallback settings.
+    private static final float STEP_PEAK_THRESHOLD = 1.05f;
+    private static final long MIN_STEP_INTERVAL_MS = 250;
+    private static final long MAX_STEP_INTERVAL_MS = 1500;
 
     private float gravityMagnitude = 9.81f;
-
     private float previousAbsLinear = 0f;
     private float olderAbsLinear = 0f;
 
     private long previousSampleTime = 0L;
     private long olderSampleTime = 0L;
-
     private long lastCandidatePeakTime = 0L;
-    private long previousCandidateInterval = 0L;
 
     private int cadenceCandidateCount = 0;
 
-    private double distanceMeters = 0;
-
-    private Location lastLocation;
-
-    private String sessionTitle = "Walking session";
-
-    private SharedPreferences stepPrefs;
-
     // --------------------------------------------------
-    // ON CREATE
+    // CREATE
     // --------------------------------------------------
 
     @Override
     public void onCreate() {
-
         super.onCreate();
 
         io = Executors.newSingleThreadExecutor();
-
         mainHandler = new Handler(Looper.getMainLooper());
 
         fused = LocationServices.getFusedLocationProviderClient(this);
@@ -143,8 +130,15 @@ public class TrackingService extends Service
         sensorManager = (SensorManager)
                 getSystemService(SENSOR_SERVICE);
 
-        // Use accelerometer-based detection with cadence filtering.
-        stepSensor = sensorManager.getDefaultSensor(
+        stepCounterSensor = sensorManager.getDefaultSensor(
+                Sensor.TYPE_STEP_COUNTER
+        );
+
+        stepDetectorSensor = sensorManager.getDefaultSensor(
+                Sensor.TYPE_STEP_DETECTOR
+        );
+
+        accelerometerSensor = sensorManager.getDefaultSensor(
                 Sensor.TYPE_ACCELEROMETER
         );
 
@@ -155,36 +149,29 @@ public class TrackingService extends Service
 
         createChannel();
 
-        // Load saved daily steps before registering the sensor.
         io.execute(() -> {
-
             String today = DateUtils.todayKey();
 
             DailyStats stats = StrideDatabase.get(
                     getApplicationContext()
             ).strideDao().getDailyStats(today);
 
-            int savedSteps = stepPrefs.getString(
-                    "date",
-                    ""
-            ).equals(today)
-                    ? stepPrefs.getInt("daily_steps", 0)
+            boolean sameDate = stepPrefs.getString(
+                    "date", ""
+            ).equals(today);
+
+            int savedSteps = sameDate
+                    ? stepPrefs.getInt(
+                    "daily_steps",
+                    stats == null ? 0 : stats.steps
+            )
                     : (stats == null ? 0 : stats.steps);
 
             mainHandler.post(() -> {
-
                 todaySteps = savedSteps;
-
                 dailyStateReady = true;
 
-                if (stepSensor != null) {
-
-                    sensorManager.registerListener(
-                            this,
-                            stepSensor,
-                            SensorManager.SENSOR_DELAY_UI
-                    );
-                }
+                registerBestAvailableSensor();
 
                 sendUpdate();
             });
@@ -192,7 +179,70 @@ public class TrackingService extends Service
     }
 
     // --------------------------------------------------
-    // START COMMAND
+    // SENSOR SELECTION
+    // --------------------------------------------------
+
+    private void registerBestAvailableSensor() {
+
+        if (sensorManager == null) return;
+
+        sensorManager.unregisterListener(this);
+        activeSensor = null;
+
+        // First preference: cumulative hardware step counter.
+        if (stepCounterSensor != null) {
+            activeSensor = stepCounterSensor;
+        }
+        // Second preference: individual hardware step detector.
+        else if (stepDetectorSensor != null) {
+            activeSensor = stepDetectorSensor;
+        }
+        // Last preference: accelerometer fallback.
+        else if (accelerometerSensor != null) {
+            activeSensor = accelerometerSensor;
+        }
+
+        if (activeSensor == null) {
+            return;
+        }
+
+        try {
+            boolean registered = sensorManager.registerListener(
+                    this,
+                    activeSensor,
+                    SensorManager.SENSOR_DELAY_NORMAL
+            );
+
+            if (!registered && activeSensor != accelerometerSensor
+                    && accelerometerSensor != null) {
+
+                activeSensor = accelerometerSensor;
+
+                sensorManager.registerListener(
+                        this,
+                        activeSensor,
+                        SensorManager.SENSOR_DELAY_UI
+                );
+            }
+
+        } catch (SecurityException e) {
+
+            // Step sensors can require ACTIVITY_RECOGNITION permission.
+            // Fall back to accelerometer if permission is unavailable.
+            if (accelerometerSensor != null) {
+                activeSensor = accelerometerSensor;
+
+                sensorManager.registerListener(
+                        this,
+                        activeSensor,
+                        SensorManager.SENSOR_DELAY_UI
+                );
+            }
+        }
+    }
+
+    // --------------------------------------------------
+    // SERVICE COMMANDS
     // --------------------------------------------------
 
     @Override
@@ -206,18 +256,16 @@ public class TrackingService extends Service
                 ? ""
                 : intent.getAction();
 
-        // START_STICKY can restart the service with a null Intent.
-        // Restore the daily-only mode instead of leaving it without a foreground notification.
         if (action == null || action.isEmpty()) {
+
             dailyMode = true;
             startForegroundServiceNotification(false);
             sendUpdate();
+
         } else if (ACTION_ENABLE_DAILY.equals(action)) {
 
             dailyMode = true;
-
             startForegroundServiceNotification(false);
-
             sendUpdate();
 
         } else if (ACTION_START.equals(action)) {
@@ -238,25 +286,8 @@ public class TrackingService extends Service
 
             startTracking(true);
 
-        } else if (ACTION_STOP.equals(action)) {
-
-            if (tracking) {
-                stopTracking();
-            }
-
-            autoMode = false;
-            dailyMode = true;
-
-            getSharedPreferences(
-                    "stride_settings",
-                    MODE_PRIVATE
-            ).edit()
-                    .putBoolean("auto_mode", false)
-                    .apply();
-
-            startForegroundServiceNotification(false);
-
-        } else if (ACTION_AUTO_OFF.equals(action)) {
+        } else if (ACTION_STOP.equals(action)
+                || ACTION_AUTO_OFF.equals(action)) {
 
             if (tracking) {
                 stopTracking();
@@ -319,11 +350,7 @@ public class TrackingService extends Service
             );
 
         } else {
-
-            startForeground(
-                    NOTIFICATION_ID,
-                    notification
-            );
+            startForeground(NOTIFICATION_ID, notification);
         }
     }
 
@@ -333,9 +360,7 @@ public class TrackingService extends Service
 
     private void startTracking(boolean automatic) {
 
-        if (tracking) {
-            return;
-        }
+        if (tracking) return;
 
         if (!hasLocationPermission()) {
             stopSelf();
@@ -347,18 +372,12 @@ public class TrackingService extends Service
         autoMode = automatic;
 
         startedAt = System.currentTimeMillis();
-
         sessionStepsStart = todaySteps;
 
         currentSteps = 0;
         distanceMeters = 0;
 
-        cadenceCandidateCount = 0;
-        lastCandidatePeakTime = 0L;
-        previousCandidateInterval = 0L;
-
         lastLocation = null;
-
         routePoints.clear();
 
         sessionTitle = automatic
@@ -368,7 +387,6 @@ public class TrackingService extends Service
         startForegroundServiceNotification(true);
 
         requestLocationUpdates();
-
         sendUpdate();
     }
 
@@ -394,9 +412,7 @@ public class TrackingService extends Service
 
     private void requestLocationUpdates() {
 
-        if (!hasLocationPermission()) {
-            return;
-        }
+        if (!hasLocationPermission()) return;
 
         LocationRequest request =
                 new LocationRequest.Builder(
@@ -411,20 +427,15 @@ public class TrackingService extends Service
             @Override
             public void onLocationResult(LocationResult result) {
 
-                if (result == null || !tracking) {
-                    return;
-                }
+                if (result == null || !tracking) return;
 
                 for (Location location : result.getLocations()) {
 
-                    if (location == null || !tracking) {
-                        continue;
-                    }
+                    if (location == null || !tracking) continue;
 
                     if (lastLocation != null) {
 
-                        float delta =
-                                lastLocation.distanceTo(location);
+                        float delta = lastLocation.distanceTo(location);
 
                         if (delta > 1 && delta < 100) {
                             distanceMeters += delta;
@@ -452,7 +463,6 @@ public class TrackingService extends Service
         };
 
         try {
-
             fused.requestLocationUpdates(
                     request,
                     locationCallback,
@@ -462,21 +472,93 @@ public class TrackingService extends Service
         } catch (SecurityException e) {
 
             tracking = false;
-
             startForegroundServiceNotification(false);
         }
     }
+
     // --------------------------------------------------
-    // AUTOMATIC DAILY STEP COUNTING
+    // AUTOMATIC STEP SENSOR
     // --------------------------------------------------
 
     @Override
     public void onSensorChanged(SensorEvent event) {
 
-        if (!dailyStateReady
-                || event.sensor.getType() != Sensor.TYPE_ACCELEROMETER) {
+        if (!dailyStateReady || event == null) return;
+
+        int type = event.sensor.getType();
+
+        if (type == Sensor.TYPE_STEP_COUNTER) {
+
+            handleStepCounter(event.values[0]);
+
+        } else if (type == Sensor.TYPE_STEP_DETECTOR) {
+
+            addConfirmedSteps(1);
+
+        } else if (type == Sensor.TYPE_ACCELEROMETER) {
+
+            handleAccelerometer(event);
+        }
+    }
+
+    // --------------------------------------------------
+    // HARDWARE STEP COUNTER
+    // --------------------------------------------------
+
+    private void handleStepCounter(float sensorTotalValue) {
+
+        int sensorTotal = (int) sensorTotalValue;
+
+        String today = DateUtils.todayKey();
+
+        String savedDate = stepPrefs.getString(
+                "sensor_date",
+                ""
+        );
+
+        int previousTotal = stepPrefs.getInt(
+                "sensor_last_total",
+                -1
+        );
+
+        // First reading of the day or first installation:
+        // establish a baseline without adding old steps.
+        if (!today.equals(savedDate) || previousTotal < 0) {
+
+            stepPrefs.edit()
+                    .putString("sensor_date", today)
+                    .putInt("sensor_last_total", sensorTotal)
+                    .apply();
+
             return;
         }
+
+        // Counter can reset after a phone reboot.
+        if (sensorTotal < previousTotal) {
+
+            stepPrefs.edit()
+                    .putInt("sensor_last_total", sensorTotal)
+                    .apply();
+
+            return;
+        }
+
+        int difference = sensorTotal - previousTotal;
+
+        if (difference <= 0) return;
+
+        stepPrefs.edit()
+                .putInt("sensor_last_total", sensorTotal)
+                .apply();
+
+        addConfirmedSteps(difference);
+    }
+
+    // --------------------------------------------------
+    // ACCELEROMETER FALLBACK
+    // --------------------------------------------------
+
+    private void handleAccelerometer(SensorEvent event) {
 
         long sampleTime = event.timestamp / 1_000_000L;
 
@@ -488,15 +570,15 @@ public class TrackingService extends Service
                 x * x + y * y + z * z
         );
 
-        // Smooth gravity and subtract it from the measured magnitude.
         gravityMagnitude =
-                0.90f * gravityMagnitude + 0.10f * magnitude;
+                0.90f * gravityMagnitude
+                        + 0.10f * magnitude;
 
-        float linearAcceleration = magnitude - gravityMagnitude;
+        float linearAcceleration =
+                magnitude - gravityMagnitude;
 
         float absoluteLinear = Math.abs(linearAcceleration);
 
-        // Identify a local peak using three consecutive samples.
         if (previousSampleTime > 0L
                 && olderSampleTime > 0L
                 && previousAbsLinear > olderAbsLinear
@@ -513,21 +595,11 @@ public class TrackingService extends Service
         previousSampleTime = sampleTime;
     }
 
-    /**
-     * Require three peaks with a plausible and reasonably stable cadence
-     * before counting steps. Once walking is confirmed, count each next
-     * regular peak.
-     */
     private void processStepCandidate(long peakTime) {
 
         if (lastCandidatePeakTime == 0L) {
-
             lastCandidatePeakTime = peakTime;
-
             cadenceCandidateCount = 1;
-
-            previousCandidateInterval = 0L;
-
             return;
         }
 
@@ -537,41 +609,30 @@ public class TrackingService extends Service
                 || interval > MAX_STEP_INTERVAL_MS) {
 
             lastCandidatePeakTime = peakTime;
-
             cadenceCandidateCount = 1;
-
-            previousCandidateInterval = 0L;
-
-            return;
-        }
-
-        if (previousCandidateInterval > 0L
-                && Math.abs(interval - previousCandidateInterval)
-                > MAX_CADENCE_VARIATION_MS) {
-
-            lastCandidatePeakTime = peakTime;
-
-            cadenceCandidateCount = 1;
-
-            previousCandidateInterval = 0L;
-
             return;
         }
 
         lastCandidatePeakTime = peakTime;
-
-        previousCandidateInterval = interval;
-
         cadenceCandidateCount++;
 
+        // Confirm after two plausible consecutive intervals.
         if (cadenceCandidateCount == 3) {
-
             addConfirmedSteps(3);
-
         } else if (cadenceCandidateCount > 3) {
-
             addConfirmedSteps(1);
         }
+    }
+
+    // --------------------------------------------------
+    // SENSOR ACCURACY CALLBACK
+    // --------------------------------------------------
+
+    @Override
+    public void onAccuracyChanged(
+            Sensor sensor,
+            int accuracy
+    ) {
     }
 
     // --------------------------------------------------
@@ -580,9 +641,7 @@ public class TrackingService extends Service
 
     private void addConfirmedSteps(int amount) {
 
-        if (amount <= 0) {
-            return;
-        }
+        if (amount <= 0) return;
 
         String today = DateUtils.todayKey();
 
@@ -595,11 +654,10 @@ public class TrackingService extends Service
 
             todaySteps = 0;
 
-            cadenceCandidateCount = 0;
-
-            lastCandidatePeakTime = 0L;
-
-            previousCandidateInterval = 0L;
+            stepPrefs.edit()
+                    .putString("date", today)
+                    .putInt("daily_steps", 0)
+                    .apply();
         }
 
         todaySteps += amount;
@@ -610,17 +668,15 @@ public class TrackingService extends Service
                 .apply();
 
         if (tracking) {
-
             currentSteps = Math.max(
                     0,
                     todaySteps - (int) sessionStepsStart
             );
         }
 
-        // Save the confirmed steps into the current minute bucket.
-        // This powers the steps-per-minute graph in Insights.
         final int stepsToSave = amount;
         final String minuteDate = today;
+
         final long minuteStart =
                 (System.currentTimeMillis() / 60000L) * 60000L;
 
@@ -630,10 +686,11 @@ public class TrackingService extends Service
                     getApplicationContext()
             );
 
-            StepMinute existing = db.strideDao().getStepMinute(
-                    minuteDate,
-                    minuteStart
-            );
+            StepMinute existing =
+                    db.strideDao().getStepMinute(
+                            minuteDate,
+                            minuteStart
+                    );
 
             int minuteSteps = existing == null
                     ? stepsToSave
@@ -649,12 +706,13 @@ public class TrackingService extends Service
         });
 
         saveDailySteps();
-
         sendUpdate();
     }
 
+// Part 2 continues below.
+
     // --------------------------------------------------
-    // SAVE DAILY STEPS
+    // ESTIMATED STEP LENGTH
     // --------------------------------------------------
 
     private double getEstimatedStepLengthMeters() {
@@ -666,16 +724,20 @@ public class TrackingService extends Service
 
         int heightCm = profile.getInt("height_cm", 0);
 
-        // 0.414 x height is a common walking step-length estimate.
-        // Fall back to 0.72 m when height is not provided.
         return heightCm > 0
                 ? (heightCm / 100.0) * 0.414
                 : 0.72;
     }
 
     private double getEstimatedDistanceMeters(int steps) {
-        return Math.max(0, steps) * getEstimatedStepLengthMeters();
+
+        return Math.max(0, steps)
+                * getEstimatedStepLengthMeters();
     }
+
+    // --------------------------------------------------
+    // ESTIMATED CALORIES
+    // --------------------------------------------------
 
     private double getEstimatedCalories(int steps) {
 
@@ -684,34 +746,49 @@ public class TrackingService extends Service
                 MODE_PRIVATE
         );
 
-        float weightKg = profile.getFloat("weight_kg", 0f);
+        float weightKg = profile.getFloat(
+                "weight_kg",
+                0f
+        );
 
         if (weightKg <= 0f) {
             return 0;
         }
 
-        double distanceKm = getEstimatedDistanceMeters(steps) / 1000.0;
+        double distanceKm =
+                getEstimatedDistanceMeters(steps) / 1000.0;
 
-        // Approximation only: weight x kilometres x 0.5.
         return weightKg * distanceKm * 0.5;
     }
+
+    // --------------------------------------------------
+    // SAVE DAILY STEPS
+    // --------------------------------------------------
 
     private void saveDailySteps() {
 
         final int steps = todaySteps;
         final String day = DateUtils.todayKey();
-        final double estimatedDistance = getEstimatedDistanceMeters(steps);
-        final double estimatedCalories = getEstimatedCalories(steps);
 
-        // Persist the daily estimates separately as well, keyed by date.
-        // Calories remain estimates and are only meaningful when weight is set.
+        final double estimatedDistance =
+                getEstimatedDistanceMeters(steps);
+
+        final double estimatedCalories =
+                getEstimatedCalories(steps);
+
         getSharedPreferences(
                 "stride_daily_metrics",
                 MODE_PRIVATE
         ).edit()
                 .putString("date", day)
-                .putFloat("distance_meters_" + day, (float) estimatedDistance)
-                .putFloat("calories_kcal_" + day, (float) estimatedCalories)
+                .putFloat(
+                        "distance_meters_" + day,
+                        (float) estimatedDistance
+                )
+                .putFloat(
+                        "calories_kcal_" + day,
+                        (float) estimatedCalories
+                )
                 .apply();
 
         io.execute(() -> {
@@ -720,22 +797,18 @@ public class TrackingService extends Service
                     getApplicationContext()
             );
 
-            DailyStats old = db.strideDao().getDailyStats(day);
-
-            // Count active minutes from the minute buckets written by the
-            // accelerometer step detector. No GPS session is required.
             List<StepMinute> minuteRows =
                     db.strideDao().getStepMinutesForDay(day);
 
             int activeMinutes = 0;
 
             for (StepMinute minute : minuteRows) {
+
                 if (minute.steps > 0) {
                     activeMinutes++;
                 }
             }
 
-            // DailyStats stores steps, estimated distance and active minutes.
             db.strideDao().upsertDailyStats(
                     new DailyStats(
                             day,
@@ -747,22 +820,13 @@ public class TrackingService extends Service
         });
     }
 
-    @Override
-    public void onAccuracyChanged(
-            Sensor sensor,
-            int accuracy
-    ) {
-    }
-
     // --------------------------------------------------
-    // STOP WALKING AND SAVE SESSION
+    // STOP WALKING SESSION
     // --------------------------------------------------
 
     private void stopTracking() {
 
-        if (!tracking) {
-            return;
-        }
+        if (!tracking) return;
 
         tracking = false;
 
@@ -831,8 +895,9 @@ public class TrackingService extends Service
                 db.strideDao().insertRoutePoints(savedPoints);
             }
 
-            // Daily steps are NOT increased here.
-            // The sensor already counted them.
+            // Daily steps are already counted by the sensor.
+            // Do not add session steps again.
+
             String day = DateUtils.todayKey();
 
             DailyStats old =
@@ -847,19 +912,17 @@ public class TrackingService extends Service
                     new DailyStats(
                             day,
                             savedDailySteps,
-                            (old == null ? 0 : old.distanceMeters)
-                                    + distance,
-                            (old == null ? 0 : old.minutes)
-                                    + (int) (duration / 60000)
+                            getEstimatedDistanceMeters(savedDailySteps),
+                            old == null ? 0 : old.minutes
                     )
             );
         });
 
         currentSteps = 0;
-
         distanceMeters = 0;
-
         lastLocation = null;
+
+        startForegroundServiceNotification(false);
 
         sendUpdate();
     }
@@ -874,9 +937,15 @@ public class TrackingService extends Service
 
         update.setPackage(getPackageName());
 
-        update.putExtra(EXTRA_STEPS, currentSteps);
+        update.putExtra(
+                EXTRA_STEPS,
+                currentSteps
+        );
 
-        update.putExtra(EXTRA_TODAY_STEPS, todaySteps);
+        update.putExtra(
+                EXTRA_TODAY_STEPS,
+                todaySteps
+        );
 
         update.putExtra(
                 EXTRA_DISTANCE,
@@ -895,11 +964,17 @@ public class TrackingService extends Service
                     lastLocation.getLongitude()
             );
 
-            update.putExtra(EXTRA_HAS_LOCATION, true);
+            update.putExtra(
+                    EXTRA_HAS_LOCATION,
+                    true
+            );
 
         } else {
 
-            update.putExtra(EXTRA_HAS_LOCATION, false);
+            update.putExtra(
+                    EXTRA_HAS_LOCATION,
+                    false
+            );
         }
 
         sendBroadcast(update);
@@ -934,7 +1009,10 @@ public class TrackingService extends Service
 
     private Notification buildNotification(String message) {
 
-        Intent open = new Intent(this, MainActivity.class);
+        Intent open = new Intent(
+                this,
+                MainActivity.class
+        );
 
         PendingIntent pending = PendingIntent.getActivity(
                 this,
@@ -944,15 +1022,26 @@ public class TrackingService extends Service
                         | PendingIntent.FLAG_IMMUTABLE
         );
 
-        return new NotificationCompat.Builder(this, CHANNEL)
+        return new NotificationCompat.Builder(
+                this,
+                CHANNEL
+        )
                 .setContentTitle("STRIDE")
                 .setContentText(message)
-                .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+                .setSmallIcon(
+                        android.R.drawable.ic_menu_mylocation
+                )
                 .setContentIntent(pending)
                 .setOngoing(true)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setPriority(
+                        NotificationCompat.PRIORITY_LOW
+                )
                 .build();
     }
+
+    // --------------------------------------------------
+    // NOTIFICATION CHANNEL
+    // --------------------------------------------------
 
     private void createChannel() {
 
@@ -971,19 +1060,25 @@ public class TrackingService extends Service
     }
 
     // --------------------------------------------------
-    // SERVICE
+    // SERVICE BINDING
     // --------------------------------------------------
 
     @Nullable
     @Override
     public IBinder onBind(Intent intent) {
+
         return null;
     }
+
+    // --------------------------------------------------
+    // SERVICE DESTROY
+    // --------------------------------------------------
 
     @Override
     public void onDestroy() {
 
         tracking = false;
+        dailyMode = false;
 
         if (sensorManager != null) {
             sensorManager.unregisterListener(this);
